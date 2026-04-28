@@ -31,8 +31,10 @@ Purple AI MCP is a read-only service - you cannot make changes to your account o
 # Install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Set credentials
-export PURPLEMCP_CONSOLE_TOKEN="your_token"
+# Store your token securely (one-time setup, see Secure Token Storage below)
+uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp-store-token
+
+# Set base URL
 export PURPLEMCP_CONSOLE_BASE_URL="https://your-console.sentinelone.net"
 
 # Run
@@ -51,47 +53,64 @@ commits in [main](https://github.com/Sentinel-One/purple-mcp/commits/main) branc
 uvx --from git+https://github.com/Sentinel-One/purple-mcp.git@<commit-hash> purple-mcp --mode=stdio
 ```
 
+### Secure Token Storage (Recommended)
+
+Instead of keeping `PURPLEMCP_CONSOLE_TOKEN` in plaintext configuration files or environment variables, you can store it in your operating system's credential manager. This uses **Windows Credential Manager** on Windows, **Keychain** on macOS, or **Secret Service** on Linux.
+
+**1. Store your token (one-time setup):**
+
+```bash
+uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp-store-token
+```
+
+You will be prompted to enter and confirm the token. The input is hidden.
+
+**2. Update your client configuration** to remove `PURPLEMCP_CONSOLE_TOKEN` from `env`:
+
+```json
+{
+  "mcpServers": {
+    "purple-mcp": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/Sentinel-One/purple-mcp.git", "purple-mcp", "--mode", "stdio"],
+      "env": {
+        "PURPLEMCP_CONSOLE_BASE_URL": "https://your-console.sentinelone.net"
+      }
+    }
+  }
+}
+```
+
+The token is automatically retrieved from the credential store at startup. If `PURPLEMCP_CONSOLE_TOKEN` is also set as an environment variable, the environment variable takes precedence.
+
+**To remove a stored token:**
+
+```bash
+uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp-delete-token
+```
+
 ### Using Docker
 
 ```bash
 # Build the image
 docker build -t purple-mcp:latest .
 
-# Run with your credentials
-export PURPLEMCP_CONSOLE_TOKEN="your_token"
-export PURPLEMCP_CONSOLE_BASE_URL="https://your-console.sentinelone.net"
-
 docker run -p 8000:8000 \
-  -e PURPLEMCP_CONSOLE_TOKEN \
-  -e PURPLEMCP_CONSOLE_BASE_URL \
+  -e PURPLEMCP_CONSOLE_TOKEN="your_token" \
+  -e PURPLEMCP_CONSOLE_BASE_URL="https://your-console.sentinelone.net" \
   -e MCP_MODE=streamable-http \
   purple-mcp:latest
 ```
 
-### Using Amazon Bedrock AgentCore
-```bash
-# Subscribe to Purple AI MCP Server via AWS Marketplace
+> **Note:** Docker containers cannot access the host OS credential store, so `PURPLEMCP_CONSOLE_TOKEN` must be passed as an environment variable. Use your platform's secrets management (e.g., Docker secrets, AWS Secrets Manager) to avoid hardcoding it.
 
-#Prepare Environment Variables
-PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net
-PURPLEMCP_CONSOLE_TOKEN=your-token
-MCP_MODE=streamable-http 
-PURPLEMCP_STATELESS_HTTP=True
-```
+### Using Amazon Bedrock AgentCore
+
 Follow instructions for Amazon Bedrock AgentCore Deployment [here](BEDROCK_AGENTCORE_DEPLOYMENT.md)
 
 ### Using Amazon Elastic Container Service (ECS)
-```bash
-# Subscribe to Purple AI MCP Server via AWS Marketplace
 
-#Prepare Environment Variables
-PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net
-PURPLEMCP_CONSOLE_TOKEN=your-token
-MCP_MODE=streamable-http 
-PURPLEMCP_STATELESS_HTTP=True
-```
 Follow instructions for Amazon Elastic Container Service Deployment [here](AMAZON_ECS_DEPLOYMENT.md)
-
 
 For production deployments, see [Deployment Guide](DOCKER.md).
 
@@ -116,7 +135,6 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
       "command": "uvx",
       "args": ["--from", "git+https://github.com/Sentinel-One/purple-mcp.git", "purple-mcp", "--mode", "stdio"],
       "env": {
-        "PURPLEMCP_CONSOLE_TOKEN": "your_token",
         "PURPLEMCP_CONSOLE_BASE_URL": "https://your-console.sentinelone.net"
       }
     }
@@ -128,13 +146,13 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 
 Run this command in a terminal:
 
-`claude mcp add --transport stdio purple-mcp --env PURPLEMCP_CONSOLE_TOKEN=your_token --env PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net -- uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp --mode stdio`
+`claude mcp add --transport stdio purple-mcp --env PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net -- uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp --mode stdio`
 
 ### OpenAI Codex
 
 Run this command in a terminal:
 
-`codex mcp add purple-mcp  --env PURPLEMCP_CONSOLE_TOKEN=your_token --env PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net -- uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp --mode stdio`
+`codex mcp add purple-mcp --env PURPLEMCP_CONSOLE_BASE_URL=https://your-console.sentinelone.net -- uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp --mode stdio`
 
 ### Pydantic AI
 
@@ -163,7 +181,6 @@ Edit `~/.zed/mcp.json`:
       "command": "uvx",
       "args": ["--from", "git+https://github.com/Sentinel-One/purple-mcp.git", "purple-mcp", "--mode", "stdio"],
       "env": {
-        "PURPLEMCP_CONSOLE_TOKEN": "your_token",
         "PURPLEMCP_CONSOLE_BASE_URL": "https://your-console.sentinelone.net"
       }
     }
@@ -177,7 +194,6 @@ For debugging or to host server for multiple clients, run in streamable-http mod
 
 ```bash
 # Terminal 1: Start server
-export PURPLEMCP_CONSOLE_TOKEN="your_token"
 export PURPLEMCP_CONSOLE_BASE_URL="https://your-console.sentinelone.net"
 uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp --mode streamable-http --host localhost --port 8000
 

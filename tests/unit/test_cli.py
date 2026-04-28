@@ -11,7 +11,15 @@ from unittest.mock import Mock, patch
 import pytest
 from click.testing import CliRunner
 
-from purple_mcp.cli import _run_mode, main
+from purple_mcp.cli import (
+    KEYRING_SERVICE_NAME,
+    KEYRING_TOKEN_KEY,
+    _resolve_token_from_keyring,
+    _run_mode,
+    delete_token,
+    main,
+    store_token,
+)
 from purple_mcp.config import ENV_PREFIX
 
 
@@ -965,3 +973,156 @@ class TestIsLoopbackHost:
 
         assert _is_loopback_host("example.com") is False
         assert _is_loopback_host("not-a-real-host") is False
+
+
+class TestResolveTokenFromKeyring:
+    """Tests for _resolve_token_from_keyring credential store lookup."""
+
+    def test_skips_when_token_already_set(self) -> None:
+        """Should not call keyring when env var is already set."""
+        env_key = f"{ENV_PREFIX}CONSOLE_TOKEN"
+        os.environ[env_key] = "existing-token"
+
+        with patch("purple_mcp.cli.keyring", create=True) as mock_keyring:
+            _resolve_token_from_keyring()
+            mock_keyring.get_password.assert_not_called()
+
+    def test_sets_env_from_keyring(self) -> None:
+        """Should populate env var from keyring when token not in env."""
+        env_key = f"{ENV_PREFIX}CONSOLE_TOKEN"
+        os.environ.pop(env_key, None)
+
+        mock_keyring = Mock()
+        mock_keyring.get_password.return_value = "keyring-token"
+
+        with (
+            patch.dict("sys.modules", {"keyring": mock_keyring}),
+            patch("purple_mcp.logging_security.register_secret") as mock_register,
+        ):
+            _resolve_token_from_keyring()
+
+            assert os.environ.get(env_key) == "keyring-token"
+            mock_keyring.get_password.assert_called_once_with(
+                KEYRING_SERVICE_NAME, KEYRING_TOKEN_KEY
+            )
+            mock_register.assert_called_once_with("keyring-token")
+
+    def test_noop_when_keyring_returns_none(self) -> None:
+        """Should not set env var when keyring has no stored credential."""
+        env_key = f"{ENV_PREFIX}CONSOLE_TOKEN"
+        os.environ.pop(env_key, None)
+
+        mock_keyring = Mock()
+        mock_keyring.get_password.return_value = None
+
+        with patch.dict("sys.modules", {"keyring": mock_keyring}):
+            _resolve_token_from_keyring()
+            assert env_key not in os.environ
+
+    def test_handles_keyring_import_error(self) -> None:
+        """Should gracefully handle missing keyring library."""
+        env_key = f"{ENV_PREFIX}CONSOLE_TOKEN"
+        os.environ.pop(env_key, None)
+
+        with patch.dict("sys.modules", {"keyring": None}):
+            # Should not raise
+            _resolve_token_from_keyring()
+            assert env_key not in os.environ
+
+    def test_handles_keyring_backend_error(self) -> None:
+        """Should gracefully handle keyring backend errors."""
+        env_key = f"{ENV_PREFIX}CONSOLE_TOKEN"
+        os.environ.pop(env_key, None)
+
+        mock_keyring = Mock()
+        mock_keyring.get_password.side_effect = Exception("No backend available")
+
+        with patch.dict("sys.modules", {"keyring": mock_keyring}):
+            _resolve_token_from_keyring()
+            assert env_key not in os.environ
+
+    def test_registers_secret_with_logging_filter(self) -> None:
+        """Should register keyring-sourced token with secret redaction."""
+        env_key = f"{ENV_PREFIX}CONSOLE_TOKEN"
+        os.environ.pop(env_key, None)
+
+        mock_keyring = Mock()
+        mock_keyring.get_password.return_value = "secret-token"
+
+        with (
+            patch.dict("sys.modules", {"keyring": mock_keyring}),
+            patch("purple_mcp.logging_security.register_secret") as mock_register,
+        ):
+            _resolve_token_from_keyring()
+            mock_register.assert_called_once_with("secret-token")
+
+
+class TestStoreToken:
+    """Tests for store-token CLI command."""
+
+    def test_store_token_success(self) -> None:
+        """Test successful token storage."""
+        runner = CliRunner()
+
+        mock_keyring = Mock()
+        with patch.dict("sys.modules", {"keyring": mock_keyring}):
+            result = runner.invoke(store_token, input="my-token\nmy-token\n")
+
+            assert result.exit_code == 0
+            mock_keyring.set_password.assert_called_once_with(
+                KEYRING_SERVICE_NAME, KEYRING_TOKEN_KEY, "my-token"
+            )
+            assert "Token stored successfully" in result.output + (result.stderr or "")
+
+    def test_store_token_keyring_error(self) -> None:
+        """Test handling of keyring storage error."""
+        runner = CliRunner()
+
+        mock_keyring = Mock()
+        mock_keyring.set_password.side_effect = Exception("Access denied")
+        with patch.dict("sys.modules", {"keyring": mock_keyring}):
+            result = runner.invoke(store_token, input="tok\ntok\n")
+
+            assert result.exit_code == 1
+            assert "Failed to store token" in result.output + (result.stderr or "")
+
+
+class TestDeleteToken:
+    """Tests for delete-token CLI command."""
+
+    def test_delete_token_success(self) -> None:
+        """Test successful token deletion."""
+        runner = CliRunner()
+
+        mock_keyring = Mock()
+        mock_keyring_errors = Mock()
+        with patch.dict(
+            "sys.modules", {"keyring": mock_keyring, "keyring.errors": mock_keyring_errors}
+        ):
+            result = runner.invoke(delete_token)
+
+            assert result.exit_code == 0
+            mock_keyring.delete_password.assert_called_once_with(
+                KEYRING_SERVICE_NAME, KEYRING_TOKEN_KEY
+            )
+            assert "Token removed" in result.output + (result.stderr or "")
+
+    def test_delete_token_not_found(self) -> None:
+        """Test handling when no token exists in credential store."""
+        runner = CliRunner()
+
+        mock_keyring_errors = Mock()
+        delete_error = type("PasswordDeleteError", (Exception,), {})
+        mock_keyring_errors.PasswordDeleteError = delete_error
+
+        mock_keyring = Mock()
+        mock_keyring.errors = mock_keyring_errors
+        mock_keyring.delete_password.side_effect = delete_error("not found")
+
+        with patch.dict(
+            "sys.modules", {"keyring": mock_keyring, "keyring.errors": mock_keyring_errors}
+        ):
+            result = runner.invoke(delete_token)
+
+            assert result.exit_code == 0
+            assert "No token found" in result.output + (result.stderr or "")

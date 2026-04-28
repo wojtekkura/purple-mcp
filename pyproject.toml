@@ -56,6 +56,8 @@ resolution = "lowest-direct"
 
 [project.scripts]
 purple-mcp = "purple_mcp.cli:main"
+purple-mcp-store-token = "purple_mcp.cli:store_token"
+purple-mcp-delete-token = "purple_mcp.cli:delete_token"
 
 [build-system]
 requires = ["hatchling"]

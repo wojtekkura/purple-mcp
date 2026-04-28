@@ -22,6 +22,9 @@ from purple_mcp.observability import instrument_starlette_app
 
 VALID_MODES: tuple[str, ...] = ("stdio", "sse", "streamable-http")
 
+KEYRING_SERVICE_NAME: str = "purple-mcp"
+KEYRING_TOKEN_KEY: str = "PURPLEMCP_CONSOLE_TOKEN"
+
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -110,6 +113,54 @@ def _apply_environment_overrides(
         os.environ[f"{ENV_PREFIX}ALERTS_GRAPHQL_ENDPOINT"] = alerts_graphql_endpoint
     if stateless_http:
         os.environ[f"{ENV_PREFIX}STATELESS_HTTP"] = str(stateless_http)
+
+
+def _resolve_token_from_keyring() -> None:
+    """Attempt to load PURPLEMCP_CONSOLE_TOKEN from the OS credential store.
+
+    If the token is already present in os.environ (set via CLI args or
+    pre-existing environment), this function is a no-op.
+
+    On success the token is written to os.environ so that Settings picks
+    it up normally, and it is registered with the secret redaction filter.
+
+    On failure (keyring unavailable, no credential stored, backend error)
+    a debug-level log is emitted and execution continues.  Settings
+    validation will later raise if the token is truly required.
+    """
+    env_key = f"{ENV_PREFIX}CONSOLE_TOKEN"
+
+    # Don't override an explicitly provided token
+    if os.environ.get(env_key):
+        return
+
+    try:
+        import keyring
+    except ImportError:
+        logging.getLogger(__name__).debug(
+            "keyring library not available; skipping credential store lookup"
+        )
+        return
+
+    try:
+        token: str | None = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_TOKEN_KEY)
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Failed to read token from OS credential store",
+            exc_info=True,
+        )
+        return
+
+    if token:
+        os.environ[env_key] = token
+        click.echo(
+            "Using PURPLEMCP_CONSOLE_TOKEN from OS credential store",
+            err=True,
+        )
+
+        from purple_mcp.logging_security import register_secret
+
+        register_secret(token)
 
 
 def _check_unsupported_config() -> None:
@@ -422,6 +473,9 @@ def main(
         stateless_http=stateless_http,
     )
 
+    # Attempt credential store lookup before Settings creation
+    _resolve_token_from_keyring()
+
     settings = _create_settings()
     click.echo("✓ Configuration validated successfully", err=True)
     if verbose:
@@ -438,6 +492,65 @@ def main(
         allow_remote_access=allow_remote_access,
         stateless_http=stateless_http,
     )
+
+
+@click.command("store-token")
+@click.option(
+    "--token",
+    prompt="Enter your PURPLEMCP_CONSOLE_TOKEN",
+    hide_input=True,
+    confirmation_prompt=True,
+    help="The SentinelOne Console API token to store",
+)
+def store_token(token: str) -> None:
+    """Store PURPLEMCP_CONSOLE_TOKEN in the OS credential store.
+
+    Saves the token to Windows Credential Manager (Windows),
+    Keychain (macOS), or Secret Service (Linux) so it does not
+    need to be specified in plaintext configuration files.
+    """
+    try:
+        import keyring
+    except ImportError:
+        click.echo(
+            "Error: keyring library is not installed. Install it with: uv add keyring",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_TOKEN_KEY, token)
+        click.echo(
+            f"Token stored successfully in OS credential store "
+            f"(service={KEYRING_SERVICE_NAME!r}, key={KEYRING_TOKEN_KEY!r})",
+            err=True,
+        )
+    except Exception as exc:
+        click.echo(f"Failed to store token: {exc}", err=True)
+        sys.exit(1)
+
+
+@click.command("delete-token")
+def delete_token() -> None:
+    """Remove PURPLEMCP_CONSOLE_TOKEN from the OS credential store."""
+    try:
+        import keyring
+        import keyring.errors
+    except ImportError:
+        click.echo(
+            "Error: keyring library is not installed. Install it with: uv add keyring",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_TOKEN_KEY)
+        click.echo("Token removed from OS credential store.", err=True)
+    except keyring.errors.PasswordDeleteError:
+        click.echo("No token found in OS credential store.", err=True)
+    except Exception as exc:
+        click.echo(f"Failed to delete token: {exc}", err=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

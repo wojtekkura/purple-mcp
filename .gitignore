@@ -6,8 +6,16 @@ dist/
 wheels/
 *.egg-info
 
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
 # Virtual environments
 .venv
+
+# Claude Code
+.claude/
 .DS_Store
 .idea
 /.env
