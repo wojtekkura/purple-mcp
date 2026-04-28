@@ -94,19 +94,19 @@ uvx --from git+https://github.com/Sentinel-One/purple-mcp.git purple-mcp-delete-
 If you prefer to add the token directly without running the `purple-mcp-store-token` command, use PowerShell:
 
 ```powershell
-cmdkey /generic:"purple-mcp/PURPLEMCP_CONSOLE_TOKEN" /user:"PURPLEMCP_CONSOLE_TOKEN" /pass:"your-token-here"
+cmdkey /generic:"purple-mcp" /user:"PURPLEMCP_CONSOLE_TOKEN" /pass:"your-token-here"
 ```
 
 To verify it was stored:
 
 ```powershell
-cmdkey /list:purple-mcp*
+cmdkey /list:"purple-mcp"
 ```
 
 To remove it:
 
 ```powershell
-cmdkey /delete:"purple-mcp/PURPLEMCP_CONSOLE_TOKEN"
+cmdkey /delete:"purple-mcp"
 ```
 
 ### Using Docker
