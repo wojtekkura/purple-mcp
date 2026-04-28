@@ -15,6 +15,14 @@ Purple AI MCP is a [Model Context Protocol](https://modelcontextprotocol.io/) se
 
 Purple AI MCP is read-only — it cannot make changes to your SentinelOne account.
 
+## Quick Start
+
+### Install uv
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) installed
