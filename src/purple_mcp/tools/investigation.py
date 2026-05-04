@@ -1,16 +1,21 @@
 """MCP tool that bundles a SentinelOne incident in a single call.
 
-This tool wraps `InvestigationCollector` so a SOAR-style sub-agent can
-fetch — in one shot — every piece of evidence it normally has to chase
-across separate Alerts / Inventory / SDL tools:
+This tool wraps `InvestigationCollector.collect()` and returns the
+**three-section** `IncidentBundle`:
 
     1. Related alerts on the same endpoint, last 72h
     2. Asset inventory record for the endpoint
     3. Remediation actions and analyst notes on the primary alert
-    4. Storyline events tied to the primary alert (PowerQuery)
 
-The response is a stable, self-describing JSON envelope (`IncidentBundle`)
-that downstream specialist agents can dispatch on.
+Storyline events were intentionally split out: real storylines on busy
+endpoints can produce hundreds of thousands of EDR rows. Bundling them
+here would inflate every triage payload past what most sub-agents can
+ingest, even when they don't need the storyline. They are now fetched
+on-demand via the separate `get_storyline_events` tool, using
+`summary.storyline_id` from this bundle.
+
+The response is a stable, self-describing JSON envelope (`IncidentBundle`,
+`schema_version: "2"`) that downstream specialist agents can dispatch on.
 """
 
 import logging
@@ -21,7 +26,6 @@ from purple_mcp.config import get_settings
 from purple_mcp.libs.investigation import (
     DEFAULT_RELATED_ALERTS_LIMIT,
     DEFAULT_REMEDIATION_HISTORY_LIMIT,
-    DEFAULT_STORYLINE_EVENT_LIMIT,
     DEFAULT_TIME_WINDOW_HOURS,
     InvestigationCollector,
     InvestigationConfig,
@@ -36,8 +40,8 @@ INITIATE_INVESTIGATION_DESCRIPTION: Final[str] = dedent(
     """
     Initiate a SOAR-ready investigation bundle for a SentinelOne incident.
 
-    Performs four data fetches in a single call and returns a structured
-    JSON envelope that downstream specialist sub-agents can ingest as-is:
+    Performs three concurrent data fetches and returns a structured JSON
+    envelope that downstream specialist sub-agents can ingest as-is:
 
     1. **Related alerts** on the same endpoint within the lookback window
        (default 72 hours), excluding the primary alert.
@@ -46,8 +50,12 @@ INITIATE_INVESTIGATION_DESCRIPTION: Final[str] = dedent(
     3. **Remediation actions taken** — full alert audit history (status
        changes, assignments, mitigation events, integration actions) plus
        all analyst notes attached to the primary alert.
-    4. **Storyline events** — SDL PowerQuery for all events sharing the
-       alert's `storylineId`, sorted by `event.time` desc.
+
+    NOTE: Storyline / EDR events are NOT included in this bundle. They can
+    contain hundreds of thousands of rows on a busy endpoint, which would
+    bloat every triage payload. Use the separate `get_storyline_events`
+    tool with `summary.storyline_id` from this bundle when a sub-agent
+    needs the EDR process tree.
 
     Args:
         alert_id: The primary alert / incident identifier. Either format
@@ -60,16 +68,15 @@ INITIATE_INVESTIGATION_DESCRIPTION: Final[str] = dedent(
             If the externalId resolves to multiple alerts the call fails
             with a clear error and the analyst must pass the UUID.
         time_window_hours: Lookback window applied to the related-alerts
-            and storyline searches. Default 72.
+            search. Default 72.
         related_alerts_limit: Max related alerts to return (1-100, default 50).
         remediation_history_limit: Max history events (1-100, default 50).
-        storyline_event_limit: Max SDL rows (default 500).
 
     Returns:
         JSON document with this shape:
 
         {
-          "schema_version": "1",
+          "schema_version": "2",
           "summary": {
             "alert_id", "asset_id", "asset_name", "asset_type",
             "storyline_id", "severity", "status", "name", "detected_at",
@@ -83,14 +90,14 @@ INITIATE_INVESTIGATION_DESCRIPTION: Final[str] = dedent(
           "asset_inventory": { "status", "item", "error" },
           "remediation":     { "status", "history_events", "history_truncated",
                                "notes", "history_error", "notes_error", "error" },
-          "storyline":       { "status", "storyline_id", "query", "columns",
-                               "match_count", "returned_count", "truncated",
-                               "partial", "warnings", "events", "error" },
           "warnings": [...]
         }
 
         Each `status` field is one of: "ok", "empty", "skipped", "failed".
-        Sub-agents should branch on status before consuming `alert/item/events`.
+        Sub-agents should branch on status before consuming `alert/item`.
+
+        `summary.storyline_id` is the input you pass to
+        `get_storyline_events` to fetch the EDR process-tree rows.
 
     Failure model:
         - If the primary alert cannot be located, the tool raises
@@ -143,9 +150,11 @@ async def initiate_investigation(
     time_window_hours: int = DEFAULT_TIME_WINDOW_HOURS,
     related_alerts_limit: int = DEFAULT_RELATED_ALERTS_LIMIT,
     remediation_history_limit: int = DEFAULT_REMEDIATION_HISTORY_LIMIT,
-    storyline_event_limit: int = DEFAULT_STORYLINE_EVENT_LIMIT,
 ) -> str:
-    """Bundle related alerts, asset inventory, remediation, and storyline.
+    """Bundle related alerts, asset inventory, and remediation for an alert.
+
+    Storylines are intentionally NOT bundled here — fetch them via the
+    separate `get_storyline_events` tool when needed.
 
     Args:
         alert_id: The primary alert identifier. Accepts EITHER the internal
@@ -153,14 +162,14 @@ async def initiate_investigation(
             numeric externalId (e.g. `2470473633234860895`) — externalIds
             are resolved automatically via the Alerts GraphQL `externalId`
             filter.
-        time_window_hours: Lookback window for related-alerts and storyline
-            searches (default 72).
+        time_window_hours: Lookback window for the related-alerts search
+            (default 72).
         related_alerts_limit: Max related alerts (1-100, default 50).
         remediation_history_limit: Max history events (1-100, default 50).
-        storyline_event_limit: Max SDL rows (default 500).
 
     Returns:
-        JSON-serialized `IncidentBundle` with per-section status/payload/error.
+        JSON-serialized `IncidentBundle` (schema_version=2) with
+        per-section status/payload/error.
 
     Raises:
         ValueError: If alert_id is empty or any limit is out of range.
@@ -179,7 +188,6 @@ async def initiate_investigation(
             time_window_hours=time_window_hours,
             related_alerts_limit=related_alerts_limit,
             remediation_history_limit=remediation_history_limit,
-            storyline_event_limit=storyline_event_limit,
         )
     except PrimaryAlertNotFoundError as exc:
         logger.warning("Primary alert not found", extra={"alert_id": alert_id})

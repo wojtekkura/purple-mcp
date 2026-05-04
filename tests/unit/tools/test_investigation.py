@@ -1,9 +1,13 @@
 """Unit tests for the initiate_investigation tool.
 
-Covers the orchestrator's branching: happy path, missing-asset/missing-storyline
-fallbacks, per-section failure isolation, and the externalId → UUID
-resolution path. Live API calls are mocked at the client level so the test
-exercises the section assembly logic without touching the network.
+Covers the orchestrator's branching: happy path, missing-asset fallback,
+per-section failure isolation, and the externalId → UUID resolution path.
+Live API calls are mocked at the client level so the test exercises the
+section assembly logic without touching the network.
+
+Storyline events are NOT bundled by `initiate_investigation` anymore —
+they live behind the separate `get_storyline_events` tool, which has
+its own test module.
 """
 
 import json
@@ -11,12 +15,6 @@ from collections.abc import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-# Use real UUID-format strings so the collector's `_looks_like_uuid` check
-# resolves them via `get_alert` directly (i.e. the happy path) rather than
-# falling into the externalId search branch.
-PRIMARY_UUID = "00000000-0000-0000-0000-000000000001"
-RELATED_UUID = "00000000-0000-0000-0000-000000000002"
 
 from purple_mcp.libs.alerts.models import (
     Alert,
@@ -33,9 +31,13 @@ from purple_mcp.libs.alerts.models import (
 )
 from purple_mcp.libs.inventory.models import InventoryItem
 from purple_mcp.libs.investigation import PrimaryAlertNotFoundError
-from purple_mcp.libs.sdl.enums import PQColumnType
-from purple_mcp.libs.sdl.models import SDLTableResultData
 from purple_mcp.tools import investigation as investigation_tool
+
+# Use real UUID-format strings so the collector's `_looks_like_uuid` check
+# resolves them via `get_alert` directly (i.e. the happy path) rather than
+# falling into the externalId search branch.
+PRIMARY_UUID = "00000000-0000-0000-0000-000000000001"
+RELATED_UUID = "00000000-0000-0000-0000-000000000002"
 
 
 def _make_alert(
@@ -67,7 +69,7 @@ def _empty_page_info() -> PageInfo:
 
 
 @pytest.fixture
-def mock_alerts_client_factory() -> "AsyncMock":
+def mock_alerts_client_factory() -> MagicMock:
     """Factory fixture: returns an AlertsClient mock with default responses.
 
     Tests override individual methods after grabbing the mock.
@@ -126,34 +128,7 @@ def mock_inventory_client_factory() -> MagicMock:
     return client
 
 
-@pytest.fixture
-def mock_sdl_handler() -> MagicMock:
-    """Factory: returns an SDLPowerQueryHandler mock with a single-row result."""
-    handler = MagicMock()
-    handler.submit_powerquery = AsyncMock()
-    handler.poll_until_complete = AsyncMock(
-        return_value=SDLTableResultData.model_validate(
-            {
-                "matchCount": 1,
-                "values": [["1730000000000", "process_create", "/usr/bin/curl"]],
-                "columns": [
-                    {"name": "event.time", "type": PQColumnType.TIMESTAMP},
-                    {"name": "event.type", "type": PQColumnType.STRING},
-                    {"name": "src.process.name", "type": PQColumnType.STRING},
-                ],
-            }
-        )
-    )
-    handler.is_result_partial = MagicMock(return_value=False)
-    handler.query_submitted = False
-    handler.query_id = None
-    handler.is_query_completed = MagicMock(return_value=True)
-    handler.delete_query = AsyncMock()
-    sdl_query_client = MagicMock()
-    sdl_query_client.is_closed = MagicMock(return_value=True)
-    sdl_query_client.close = AsyncMock()
-    handler.sdl_query_client = sdl_query_client
-    return handler
+# ---------------------------------------------------------- happy path / branches
 
 
 @pytest.mark.asyncio
@@ -161,9 +136,8 @@ async def test_initiate_investigation_happy_path(
     mock_settings: Callable[..., MagicMock],
     mock_alerts_client_factory: MagicMock,
     mock_inventory_client_factory: MagicMock,
-    mock_sdl_handler: MagicMock,
 ) -> None:
-    """All four sections should populate when every API responds normally."""
+    """All three sections should populate when every API responds normally."""
     with (
         patch(
             "purple_mcp.tools.investigation.get_settings",
@@ -177,19 +151,20 @@ async def test_initiate_investigation_happy_path(
             "purple_mcp.libs.investigation.collector.InventoryClient",
             return_value=mock_inventory_client_factory,
         ),
-        patch(
-            "purple_mcp.libs.investigation.collector.SDLPowerQueryHandler",
-            return_value=mock_sdl_handler,
-        ),
     ):
         result = await investigation_tool.initiate_investigation(PRIMARY_UUID)
 
     bundle = json.loads(result)
 
-    assert bundle["schema_version"] == "1"
+    assert bundle["schema_version"] == "2"
+    # Storyline section is no longer part of the bundle envelope
+    assert "storyline" not in bundle
+    # …but storyline_id IS surfaced in the summary so the analyst can
+    # hand it to `get_storyline_events`.
+    assert bundle["summary"]["storyline_id"] == "story-1"
+
     assert bundle["summary"]["alert_id"] == PRIMARY_UUID
     assert bundle["summary"]["asset_id"] == "asset-1"
-    assert bundle["summary"]["storyline_id"] == "story-1"
     assert bundle["summary"]["time_window_hours"] == 72
 
     assert bundle["primary_alert"]["status"] == "ok"
@@ -207,17 +182,12 @@ async def test_initiate_investigation_happy_path(
     assert len(bundle["remediation"]["history_events"]) == 1
     assert len(bundle["remediation"]["notes"]) == 1
 
-    assert bundle["storyline"]["status"] == "ok"
-    assert bundle["storyline"]["returned_count"] == 1
-    assert bundle["storyline"]["events"][0]["fields"]["event.type"] == "process_create"
-
 
 @pytest.mark.asyncio
 async def test_initiate_investigation_skips_when_asset_missing(
     mock_settings: Callable[..., MagicMock],
     mock_alerts_client_factory: MagicMock,
     mock_inventory_client_factory: MagicMock,
-    mock_sdl_handler: MagicMock,
 ) -> None:
     """No asset.id → related_alerts and asset_inventory must skip cleanly."""
     mock_alerts_client_factory.get_alert = AsyncMock(
@@ -237,31 +207,30 @@ async def test_initiate_investigation_skips_when_asset_missing(
             "purple_mcp.libs.investigation.collector.InventoryClient",
             return_value=mock_inventory_client_factory,
         ),
-        patch(
-            "purple_mcp.libs.investigation.collector.SDLPowerQueryHandler",
-            return_value=mock_sdl_handler,
-        ),
     ):
         result = await investigation_tool.initiate_investigation(PRIMARY_UUID)
 
     bundle = json.loads(result)
     assert bundle["related_alerts"]["status"] == "skipped"
     assert bundle["asset_inventory"]["status"] == "skipped"
-    assert bundle["storyline"]["status"] == "ok"
+    # Remediation does NOT depend on asset_id, so it should still run.
+    assert bundle["remediation"]["status"] == "ok"
     # Warning should call out the skip reason
     assert any("asset.id" in w for w in bundle["warnings"])
 
 
 @pytest.mark.asyncio
-async def test_initiate_investigation_storyline_failure_isolated(
+async def test_initiate_investigation_remediation_failure_isolated(
     mock_settings: Callable[..., MagicMock],
     mock_alerts_client_factory: MagicMock,
     mock_inventory_client_factory: MagicMock,
-    mock_sdl_handler: MagicMock,
 ) -> None:
-    """A storyline PQ failure must NOT take down the rest of the bundle."""
-    mock_sdl_handler.submit_powerquery = AsyncMock(
-        side_effect=RuntimeError("SDL: Service unavailable"),
+    """A remediation fetch failure must NOT take down the rest of the bundle."""
+    mock_alerts_client_factory.get_alert_history = AsyncMock(
+        side_effect=RuntimeError("history: 500"),
+    )
+    mock_alerts_client_factory.get_alert_notes = AsyncMock(
+        side_effect=RuntimeError("notes: 500"),
     )
 
     with (
@@ -277,10 +246,6 @@ async def test_initiate_investigation_storyline_failure_isolated(
             "purple_mcp.libs.investigation.collector.InventoryClient",
             return_value=mock_inventory_client_factory,
         ),
-        patch(
-            "purple_mcp.libs.investigation.collector.SDLPowerQueryHandler",
-            return_value=mock_sdl_handler,
-        ),
     ):
         result = await investigation_tool.initiate_investigation(PRIMARY_UUID)
 
@@ -288,9 +253,8 @@ async def test_initiate_investigation_storyline_failure_isolated(
     assert bundle["primary_alert"]["status"] == "ok"
     assert bundle["related_alerts"]["status"] == "ok"
     assert bundle["asset_inventory"]["status"] == "ok"
-    assert bundle["remediation"]["status"] == "ok"
-    assert bundle["storyline"]["status"] == "failed"
-    assert "Service unavailable" in bundle["storyline"]["error"]
+    assert bundle["remediation"]["status"] == "failed"
+    assert "history: 500" in bundle["remediation"]["error"]
 
 
 @pytest.mark.asyncio
@@ -298,10 +262,8 @@ async def test_initiate_investigation_primary_missing_raises(
     mock_settings: Callable[..., MagicMock],
     mock_alerts_client_factory: MagicMock,
     mock_inventory_client_factory: MagicMock,
-    mock_sdl_handler: MagicMock,
 ) -> None:
     """If the primary alert is not found, the call must raise (not return)."""
-    # Real UUID input → goes straight through `get_alert`; mock that to None.
     mock_alerts_client_factory.get_alert = AsyncMock(return_value=None)
 
     with (
@@ -316,10 +278,6 @@ async def test_initiate_investigation_primary_missing_raises(
         patch(
             "purple_mcp.libs.investigation.collector.InventoryClient",
             return_value=mock_inventory_client_factory,
-        ),
-        patch(
-            "purple_mcp.libs.investigation.collector.SDLPowerQueryHandler",
-            return_value=mock_sdl_handler,
         ),
         pytest.raises(RuntimeError) as exc_info,
     ):
@@ -337,7 +295,7 @@ async def test_initiate_investigation_validates_inputs(
     """Empty alert_id and out-of-range limits should raise ValueError early.
 
     These checks fire BEFORE any client construction, so we don't need to
-    mock the alerts/inventory/SDL clients here.
+    mock the alerts/inventory clients here.
     """
     with patch(
         "purple_mcp.tools.investigation.get_settings",
@@ -351,25 +309,22 @@ async def test_initiate_investigation_validates_inputs(
             await investigation_tool.initiate_investigation(PRIMARY_UUID, time_window_hours=-1)
 
 
+# ---------------------------------------------------- externalId resolver path
+
+
 @pytest.mark.asyncio
 async def test_initiate_investigation_resolves_external_id(
     mock_settings: Callable[..., MagicMock],
     mock_alerts_client_factory: MagicMock,
     mock_inventory_client_factory: MagicMock,
-    mock_sdl_handler: MagicMock,
 ) -> None:
-    """A numeric externalId input should resolve to its UUID via search_alerts.
-
-    Reproduces the SOC-analyst case from PR #1 follow-up: the analyst pastes
-    an externalId from a ticket; the collector must transparently look up
-    the matching UUID and continue.
-    """
+    """A numeric externalId input should resolve to its UUID via search_alerts."""
     external_id = "2470473633234860895"
 
     # First search_alerts call (resolver) returns exactly one alert; the
-    # second call (related-alerts fan-out) uses the default mock fixture
-    # behaviour. We chain the side_effect so each invocation gets the right
-    # response in order.
+    # second call (related-alerts fan-out) returns its own response. We
+    # chain the side_effect so each invocation gets the right response in
+    # order.
     resolver_response = AlertConnection(
         edges=[AlertEdge(node=_make_alert(alert_id=PRIMARY_UUID), cursor="r1")],
         pageInfo=_empty_page_info(),
@@ -397,10 +352,6 @@ async def test_initiate_investigation_resolves_external_id(
             "purple_mcp.libs.investigation.collector.InventoryClient",
             return_value=mock_inventory_client_factory,
         ),
-        patch(
-            "purple_mcp.libs.investigation.collector.SDLPowerQueryHandler",
-            return_value=mock_sdl_handler,
-        ),
     ):
         result = await investigation_tool.initiate_investigation(external_id)
 
@@ -423,7 +374,6 @@ async def test_initiate_investigation_external_id_not_found(
     mock_settings: Callable[..., MagicMock],
     mock_alerts_client_factory: MagicMock,
     mock_inventory_client_factory: MagicMock,
-    mock_sdl_handler: MagicMock,
 ) -> None:
     """A non-UUID input that resolves to zero matches must raise clearly."""
     mock_alerts_client_factory.search_alerts = AsyncMock(
@@ -447,10 +397,6 @@ async def test_initiate_investigation_external_id_not_found(
             "purple_mcp.libs.investigation.collector.InventoryClient",
             return_value=mock_inventory_client_factory,
         ),
-        patch(
-            "purple_mcp.libs.investigation.collector.SDLPowerQueryHandler",
-            return_value=mock_sdl_handler,
-        ),
         pytest.raises(RuntimeError) as exc_info,
     ):
         await investigation_tool.initiate_investigation("9999999999999999")
@@ -464,7 +410,6 @@ async def test_initiate_investigation_external_id_ambiguous(
     mock_settings: Callable[..., MagicMock],
     mock_alerts_client_factory: MagicMock,
     mock_inventory_client_factory: MagicMock,
-    mock_sdl_handler: MagicMock,
 ) -> None:
     """Multiple alerts sharing an externalId must surface as a clear error."""
     mock_alerts_client_factory.search_alerts = AsyncMock(
@@ -490,10 +435,6 @@ async def test_initiate_investigation_external_id_ambiguous(
         patch(
             "purple_mcp.libs.investigation.collector.InventoryClient",
             return_value=mock_inventory_client_factory,
-        ),
-        patch(
-            "purple_mcp.libs.investigation.collector.SDLPowerQueryHandler",
-            return_value=mock_sdl_handler,
         ),
         pytest.raises(RuntimeError) as exc_info,
     ):

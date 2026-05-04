@@ -1,17 +1,27 @@
 """Orchestrator that bundles a SentinelOne incident for downstream sub-agents.
 
-`InvestigationCollector.collect()` performs the four canonical triage fetches:
+`InvestigationCollector.collect()` performs three triage fetches in one
+call (storyline events are explicitly NOT included — see below):
 
 1. Related alerts on the same endpoint, last 72h (Alerts GraphQL)
 2. Asset inventory record for the endpoint (Inventory REST)
 3. Remediation actions and analyst notes on the primary alert (Alerts GraphQL)
-4. Storyline events tied to the primary alert (SDL PowerQuery)
 
-The primary alert is fetched first (we need its `asset.id` and `storyline_id`
-to fan out the other calls). After that, the four subordinate fetches run
-concurrently with `asyncio.gather(return_exceptions=True)` so a failure in
-one section never blocks the others — the bundle is always returned with
-per-section status, error string, and payload.
+The primary alert is fetched first (we need its `asset.id` to fan out the
+other calls and we surface its `storyline_id` in the summary). After
+that, the three subordinate fetches run concurrently with
+`asyncio.gather(return_exceptions=True)` so a failure in one section
+never blocks the others — the bundle is always returned with per-section
+status, error string, and payload.
+
+The storyline fetch is intentionally NOT bundled into `collect()`. Real
+storylines on busy endpoints can return hundreds of thousands of EDR
+events (one live test saw `match_count=172_820` from a single
+storyline), which makes the bundle multi-megabyte and dominates the
+sub-agent's context. Instead, `fetch_storyline_events()` is exposed as a
+separate public method and surfaced as its own MCP tool
+(`get_storyline_events`); a downstream sub-agent calls it on-demand with
+its own limits/time-window using `summary.storyline_id` from the bundle.
 """
 
 import logging
@@ -81,17 +91,27 @@ class InvestigationCollector:
         time_window_hours: int = DEFAULT_TIME_WINDOW_HOURS,
         related_alerts_limit: int = DEFAULT_RELATED_ALERTS_LIMIT,
         remediation_history_limit: int = DEFAULT_REMEDIATION_HISTORY_LIMIT,
-        storyline_event_limit: int = DEFAULT_STORYLINE_EVENT_LIMIT,
     ) -> IncidentBundle:
-        """Collect the four-section investigation bundle for an alert.
+        """Collect the three-section investigation bundle for an alert.
+
+        Sections:
+            1. related_alerts   — other alerts on the same endpoint, last `time_window_hours`
+            2. asset_inventory  — InventoryItem for the endpoint
+            3. remediation      — alert history audit log + analyst notes
+
+        Storyline events are NOT included here; call `fetch_storyline_events()`
+        (or the `get_storyline_events` MCP tool) on demand using
+        `summary.storyline_id` from the returned bundle.
 
         Args:
             alert_id: The unique identifier of the primary alert (incident).
-            time_window_hours: Lookback window applied to related-alerts and
-                storyline searches. Defaults to 72.
+                Accepts either the internal UUID or a numeric externalId
+                (the latter is auto-resolved via the Alerts GraphQL
+                `externalId` filter).
+            time_window_hours: Lookback window applied to the related-alerts
+                search. Defaults to 72.
             related_alerts_limit: Max number of related alerts to return.
             remediation_history_limit: Max number of history events to return.
-            storyline_event_limit: Max number of SDL rows to return.
 
         Returns:
             A populated `IncidentBundle` with per-section status, payload,
@@ -99,9 +119,9 @@ class InvestigationCollector:
 
         Raises:
             PrimaryAlertNotFoundError: If the primary alert cannot be located.
-                Without it we have no asset_id or storyline_id to drive the
-                other fetches, so collection cannot proceed.
-            ValueError: If any limit/window argument is non-positive.
+                Without it we have no asset_id to drive the other fetches,
+                so collection cannot proceed.
+            ValueError: If any limit/window argument is out of range.
         """
         if time_window_hours <= 0:
             raise ValueError("time_window_hours must be positive")
@@ -109,8 +129,6 @@ class InvestigationCollector:
             raise ValueError("related_alerts_limit must be between 1 and 100")
         if remediation_history_limit <= 0 or remediation_history_limit > 100:
             raise ValueError("remediation_history_limit must be between 1 and 100")
-        if storyline_event_limit <= 0:
-            raise ValueError("storyline_event_limit must be positive")
 
         alert_id = alert_id.strip()
         if not alert_id:
@@ -143,10 +161,11 @@ class InvestigationCollector:
             )
         if not storyline_id:
             warnings.append(
-                "Primary alert has no storyline_id; storyline section will be skipped."
+                "Primary alert has no storyline_id; the bundle will not include "
+                "a storyline_id for the get_storyline_events tool."
             )
 
-        # ---- Phase 2: fan out the four subordinate fetches concurrently
+        # ---- Phase 2: fan out the three subordinate fetches concurrently
         import asyncio
 
         # IMPORTANT: use the resolved UUID (`primary_alert.id`), not the raw
@@ -176,25 +195,11 @@ class InvestigationCollector:
                 history_limit=remediation_history_limit,
             )
         )
-        storyline_task = asyncio.create_task(
-            self._fetch_storyline(
-                storyline_id=storyline_id,
-                window_start=start_time,
-                window_end=end_time,
-                limit=storyline_event_limit,
-            )
-        )
 
-        (
-            related_section,
-            inventory_section,
-            remediation_section,
-            storyline_section,
-        ) = await asyncio.gather(
+        related_section, inventory_section, remediation_section = await asyncio.gather(
             related_task,
             inventory_task,
             remediation_task,
-            storyline_task,
         )
 
         summary = IncidentSummary(
@@ -228,7 +233,6 @@ class InvestigationCollector:
             related_alerts=related_section,
             asset_inventory=inventory_section,
             remediation=remediation_section,
-            storyline=storyline_section,
             warnings=warnings,
         )
 
@@ -516,7 +520,51 @@ class InvestigationCollector:
             notes_error=notes_error,
         )
 
-    async def _fetch_storyline(
+    async def fetch_storyline_events(
+        self,
+        storyline_id: str,
+        time_window_hours: int = DEFAULT_TIME_WINDOW_HOURS,
+        limit: int = DEFAULT_STORYLINE_EVENT_LIMIT,
+    ) -> StorylineSection:
+        """Public API: fetch SDL events for a storyline_id.
+
+        This is intentionally separate from `collect()` because storyline
+        events on busy endpoints can run into the hundreds of thousands of
+        rows; bundling them into the main investigation envelope would
+        bloat the per-call payload past what most sub-agents can ingest.
+        Use this when a sub-agent has decided it actually needs the EDR
+        process tree for the alert.
+
+        Args:
+            storyline_id: The storyline identifier from
+                `IncidentBundle.summary.storyline_id`.
+            time_window_hours: Lookback window for the SDL query (default 72).
+            limit: Max rows to return (default 500).
+
+        Returns:
+            `StorylineSection` with status, projected events, and the
+            generated PowerQuery (so the sub-agent can adapt it).
+
+        Raises:
+            ValueError: If `storyline_id` is empty or limits are out of range.
+        """
+        if not storyline_id or not storyline_id.strip():
+            raise ValueError("storyline_id cannot be empty")
+        if time_window_hours <= 0:
+            raise ValueError("time_window_hours must be positive")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=time_window_hours)
+        return await self._fetch_storyline_events(
+            storyline_id=storyline_id.strip(),
+            window_start=start_time,
+            window_end=end_time,
+            limit=limit,
+        )
+
+    async def _fetch_storyline_events(
         self,
         storyline_id: str | None,
         window_start: datetime,
@@ -533,7 +581,7 @@ class InvestigationCollector:
         zero rows.
 
         We also project a curated set of columns rather than pulling every
-        attribute. This keeps the bundle size predictable and gives a
+        attribute. This keeps the response size predictable and gives a
         downstream sub-agent the exact fields it needs to reconstruct a
         process tree (timestamp, src + tgt process identifiers, file/dns
         targets, command-line) without paying for unused columns.
