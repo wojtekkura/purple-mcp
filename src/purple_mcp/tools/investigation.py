@@ -50,7 +50,15 @@ INITIATE_INVESTIGATION_DESCRIPTION: Final[str] = dedent(
        alert's `storylineId`, sorted by `event.time` desc.
 
     Args:
-        alert_id: The unique identifier of the primary alert (incident).
+        alert_id: The primary alert / incident identifier. Either format
+            is accepted:
+              - Internal UUID (e.g. `019de8cc-6d14-7adc-993a-710e4123976a`).
+              - External numeric id (e.g. `2470473633234860895`) — the kind
+                analysts typically copy from a ticket / email / SIEM. The
+                tool transparently resolves it via the Alerts GraphQL
+                `externalId` filter before continuing.
+            If the externalId resolves to multiple alerts the call fails
+            with a clear error and the analyst must pass the UUID.
         time_window_hours: Lookback window applied to the related-alerts
             and storyline searches. Default 72.
         related_alerts_limit: Max related alerts to return (1-100, default 50).
@@ -140,7 +148,11 @@ async def initiate_investigation(
     """Bundle related alerts, asset inventory, remediation, and storyline.
 
     Args:
-        alert_id: The primary alert / incident identifier.
+        alert_id: The primary alert identifier. Accepts EITHER the internal
+            UUID (e.g. `019de8cc-6d14-7adc-993a-710e4123976a`) OR the
+            numeric externalId (e.g. `2470473633234860895`) — externalIds
+            are resolved automatically via the Alerts GraphQL `externalId`
+            filter.
         time_window_hours: Lookback window for related-alerts and storyline
             searches (default 72).
         related_alerts_limit: Max related alerts (1-100, default 50).
