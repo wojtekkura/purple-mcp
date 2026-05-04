@@ -29,12 +29,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from purple_mcp.libs.alerts import AlertsClient, AlertsConfig, FilterInput, ViewType
-from purple_mcp.libs.alerts.models import (
-    Alert,
-    AlertHistoryConnection,
-    AlertHistoryEvent,
-    AlertNote,
-)
+from purple_mcp.libs.alerts.models import Alert, AlertHistoryEvent, AlertNote
 from purple_mcp.libs.inventory import (
     InventoryClient,
     InventoryConfig,
@@ -68,7 +63,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIME_WINDOW_HOURS: int = 72
 DEFAULT_RELATED_ALERTS_LIMIT: int = 50
-DEFAULT_REMEDIATION_HISTORY_LIMIT: int = 50
+
+# Default total cap on remediation history events. Bumped from 50 (the
+# original single-page default) to 200 now that `_fetch_remediation`
+# auto-paginates: most alerts have well under 50 events, but a heavily
+# triaged incident (multiple analysts, multi-integration tickets,
+# repeated mitigation attempts) can easily produce 100+ history rows
+# and we want the bundle to capture every action by default.
+DEFAULT_REMEDIATION_HISTORY_LIMIT: int = 200
+
+# Per-API-call page size for the alert-history pagination loop. The S1
+# Alerts GraphQL caps `first` at 100, so this is the largest single
+# page we can request.
+DEFAULT_HISTORY_PAGE_SIZE: int = 100
+
 DEFAULT_STORYLINE_EVENT_LIMIT: int = 500
 DEFAULT_STORYLINE_POLL_TIMEOUT_MS: int = 120_000
 
@@ -97,7 +105,16 @@ class InvestigationCollector:
         Sections:
             1. related_alerts   — other alerts on the same endpoint, last `time_window_hours`
             2. asset_inventory  — InventoryItem for the endpoint
-            3. remediation      — alert history audit log + analyst notes
+            3. remediation      — EVERY alert-history audit event (auto-paginated)
+                                  + every analyst note. Mitigation actions
+                                  (kill / quarantine / rollback / network
+                                  isolate / ticket events / status changes /
+                                  verdict updates) all surface here as
+                                  `history_events` rows. `history_truncated`
+                                  is True only if we hit `remediation_history_limit`
+                                  before exhausting the API — otherwise every
+                                  action ever recorded on the alert is in
+                                  the bundle.
 
         Storyline events are NOT included here; call `fetch_storyline_events()`
         (or the `get_storyline_events` MCP tool) on demand using
@@ -111,7 +128,11 @@ class InvestigationCollector:
             time_window_hours: Lookback window applied to the related-alerts
                 search. Defaults to 72.
             related_alerts_limit: Max number of related alerts to return.
-            remediation_history_limit: Max number of history events to return.
+            remediation_history_limit: HARD CAP on total history events
+                fetched across pagination. Default 200. The collector
+                pages the alert-history endpoint until it either runs
+                out of events (every action captured) or hits this cap.
+                Bump this if a heavily-investigated alert truncates.
 
         Returns:
             A populated `IncidentBundle` with per-section status, payload,
@@ -127,8 +148,8 @@ class InvestigationCollector:
             raise ValueError("time_window_hours must be positive")
         if related_alerts_limit <= 0 or related_alerts_limit > 100:
             raise ValueError("related_alerts_limit must be between 1 and 100")
-        if remediation_history_limit <= 0 or remediation_history_limit > 100:
-            raise ValueError("remediation_history_limit must be between 1 and 100")
+        if remediation_history_limit <= 0 or remediation_history_limit > 1000:
+            raise ValueError("remediation_history_limit must be between 1 and 1000")
 
         alert_id = alert_id.strip()
         if not alert_id:
@@ -192,7 +213,7 @@ class InvestigationCollector:
             self._fetch_remediation(
                 alerts_client=alerts_client,
                 alert_id=resolved_alert_id,
-                history_limit=remediation_history_limit,
+                history_total_cap=remediation_history_limit,
             )
         )
 
@@ -449,51 +470,103 @@ class InvestigationCollector:
         self,
         alerts_client: AlertsClient,
         alert_id: str,
-        history_limit: int,
+        history_total_cap: int,
+        history_page_size: int = DEFAULT_HISTORY_PAGE_SIZE,
     ) -> RemediationSection:
-        """Fetch alert history (audit/remediation events) and analyst notes.
+        """Fetch ALL alert history events plus analyst notes.
 
-        History and notes are retrieved with a single concurrent gather so
-        the remediation sub-agent receives both halves in one shot. Either
-        sub-call can fail independently and the section will still return
-        whatever succeeded.
+        History pagination is exhaustive — we walk the connection until
+        `pageInfo.hasNextPage=false` or we hit `history_total_cap`,
+        whichever comes first. This guarantees that every remediation
+        action recorded on the alert (mitigation events, ticket updates,
+        analyst verdict changes, integration callbacks, …) is included,
+        not just the first page returned by the API.
+
+        Pagination strategy:
+            - Notes are launched concurrently and awaited after the
+              history loop completes (notes don't paginate in this API).
+            - History is paged sequentially using the connection's
+              `endCursor` (cursor pagination is sequential by design;
+              parallel page requests against the same cursor stream
+              would race).
+            - Each page asks for `min(history_page_size, remaining_cap)`
+              rows, so we never fetch more than `history_total_cap` total.
+            - `history_truncated` is True only if we hit the cap AND
+              there were more events available (i.e. we actually
+              dropped data); a clean exhaust sets it to False.
+
+        Either side of the gather can fail independently and the section
+        will still return whatever succeeded.
         """
         import asyncio
 
-        history_call = alerts_client.get_alert_history(alert_id=alert_id, first=history_limit)
-        notes_call = alerts_client.get_alert_notes(alert_id=alert_id)
-
-        results = await asyncio.gather(history_call, notes_call, return_exceptions=True)
-        history_result, notes_result = results
+        # Notes don't paginate — fire it off and pick it up at the end.
+        notes_task = asyncio.create_task(alerts_client.get_alert_notes(alert_id=alert_id))
 
         history_events: list[AlertHistoryEvent] = []
         history_truncated = False
         history_error: str | None = None
-        if isinstance(history_result, BaseException):
-            history_error = str(history_result)
+        history_pages_fetched = 0
+
+        cursor: str | None = None
+        try:
+            while True:
+                remaining = history_total_cap - len(history_events)
+                if remaining <= 0:
+                    # We hit the cap. Whether or not the API has more
+                    # is signaled by the most recent page's hasNextPage,
+                    # already captured below before we'd reach this branch.
+                    break
+
+                page_size = max(1, min(history_page_size, remaining))
+                connection = await alerts_client.get_alert_history(
+                    alert_id=alert_id, first=page_size, after=cursor
+                )
+                history_pages_fetched += 1
+                history_events.extend(edge.node for edge in connection.edges)
+
+                page_info = connection.page_info
+                if page_info is None or not page_info.has_next_page:
+                    # Exhausted — every recorded action is now in our list.
+                    break
+                if not page_info.end_cursor:
+                    # Defensive: the API claims there's more but didn't
+                    # give us a cursor. Treat as truncated and stop.
+                    history_truncated = True
+                    break
+
+                if len(history_events) >= history_total_cap:
+                    # Hit the cap exactly. The API still says more
+                    # exists (we just checked has_next_page=true), so
+                    # mark truncated and stop.
+                    history_truncated = True
+                    break
+
+                cursor = page_info.end_cursor
+        except Exception as exc:
+            history_error = str(exc)
             logger.warning(
                 "Failed to fetch alert history",
-                extra={"alert_id": alert_id, "error": history_error},
-            )
-        else:
-            assert isinstance(history_result, AlertHistoryConnection)
-            history_events = [edge.node for edge in history_result.edges]
-            history_truncated = (
-                history_result.page_info.has_next_page
-                if history_result.page_info is not None
-                else False
+                extra={
+                    "alert_id": alert_id,
+                    "error": history_error,
+                    "pages_fetched": history_pages_fetched,
+                    "events_so_far": len(history_events),
+                },
             )
 
+        # Now collect notes.
         notes: list[AlertNote] = []
         notes_error: str | None = None
-        if isinstance(notes_result, BaseException):
-            notes_error = str(notes_result)
+        try:
+            notes_response = await notes_task
+            notes = list(notes_response.data)
+        except Exception as exc:
+            notes_error = str(exc)
             logger.warning(
                 "Failed to fetch alert notes",
                 extra={"alert_id": alert_id, "error": notes_error},
             )
-        else:
-            notes = list(notes_result.data)
 
         if history_error and notes_error:
             return RemediationSection(

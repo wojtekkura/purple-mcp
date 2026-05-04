@@ -47,9 +47,20 @@ INITIATE_INVESTIGATION_DESCRIPTION: Final[str] = dedent(
        (default 72 hours), excluding the primary alert.
     2. **Asset inventory** record for the endpoint (full InventoryItem,
        including agent/cloud/identity surface fields where present).
-    3. **Remediation actions taken** — full alert audit history (status
-       changes, assignments, mitigation events, integration actions) plus
-       all analyst notes attached to the primary alert.
+    3. **Remediation actions taken** — EVERY action recorded against the
+       alert. The tool auto-paginates the alert-history endpoint until
+       it has all events (or hits `remediation_history_limit` as a hard
+       safety cap). Surfaces:
+         - Mitigation actions (kill / quarantine / rollback / network
+           isolation) with their status updates.
+         - Status changes (NEW → IN_PROGRESS → RESOLVED, etc).
+         - Assignment / unassignment events.
+         - Analyst-verdict updates.
+         - Integration actions (external-ticket creation/updates).
+         - Plus every analyst note attached to the primary alert.
+       `remediation.history_truncated=true` ONLY if we hit the cap —
+       a clean exhaust means the section literally contains every
+       action ever recorded on the alert.
 
     NOTE: Storyline / EDR events are NOT included in this bundle. They can
     contain hundreds of thousands of rows on a busy endpoint, which would
@@ -70,7 +81,11 @@ INITIATE_INVESTIGATION_DESCRIPTION: Final[str] = dedent(
         time_window_hours: Lookback window applied to the related-alerts
             search. Default 72.
         related_alerts_limit: Max related alerts to return (1-100, default 50).
-        remediation_history_limit: Max history events (1-100, default 50).
+        remediation_history_limit: HARD CAP on total alert-history
+            events fetched across pagination (1-1000, default 200).
+            The tool keeps paging the alert-history endpoint until the
+            API runs out of events OR this cap is reached. Bump it (up
+            to 1000) for heavily-investigated incidents that truncate.
 
     Returns:
         JSON document with this shape:
@@ -165,7 +180,10 @@ async def initiate_investigation(
         time_window_hours: Lookback window for the related-alerts search
             (default 72).
         related_alerts_limit: Max related alerts (1-100, default 50).
-        remediation_history_limit: Max history events (1-100, default 50).
+        remediation_history_limit: Hard cap on total alert-history events
+            fetched across pagination (1-1000, default 200). The collector
+            pages until the API runs out OR this cap is hit, ensuring
+            every recorded remediation action is captured by default.
 
     Returns:
         JSON-serialized `IncidentBundle` (schema_version=2) with

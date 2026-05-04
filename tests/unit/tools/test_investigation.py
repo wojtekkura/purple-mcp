@@ -441,3 +441,145 @@ async def test_initiate_investigation_external_id_ambiguous(
         await investigation_tool.initiate_investigation("12345678901234567")
 
     assert "Ambiguous" in str(exc_info.value) or "ambiguous" in str(exc_info.value)
+
+
+# ----------------------------------------- remediation history pagination
+
+
+def _history_event(text: str, event_type: str = "MITIGATION_ACTION") -> AlertHistoryEvent:
+    """Build a minimal AlertHistoryEvent for pagination test data."""
+    return AlertHistoryEvent(
+        createdAt="2026-05-01T13:00:00Z",
+        eventText=text,
+        eventType=event_type,
+    )
+
+
+def _history_page(
+    events: list[AlertHistoryEvent],
+    has_next: bool,
+    end_cursor: str | None = None,
+) -> AlertHistoryConnection:
+    """Build an AlertHistoryConnection page with optional next-page cursor."""
+    return AlertHistoryConnection(
+        edges=[AlertHistoryEdge(node=ev, cursor=f"c{i}") for i, ev in enumerate(events)],
+        pageInfo=PageInfo(
+            hasNextPage=has_next,
+            hasPreviousPage=False,
+            endCursor=end_cursor,
+        ),
+        totalCount=len(events),
+    )
+
+
+@pytest.mark.asyncio
+async def test_initiate_investigation_paginates_history_to_completion(
+    mock_settings: Callable[..., MagicMock],
+    mock_alerts_client_factory: MagicMock,
+    mock_inventory_client_factory: MagicMock,
+) -> None:
+    """When the alert-history endpoint paginates, every page is fetched."""
+    page_one = _history_page(
+        events=[_history_event(f"action-{i}") for i in range(3)],
+        has_next=True,
+        end_cursor="cursor-page-1",
+    )
+    page_two = _history_page(
+        events=[_history_event(f"action-{i}") for i in range(3, 5)],
+        has_next=False,
+    )
+    mock_alerts_client_factory.get_alert_history = AsyncMock(side_effect=[page_one, page_two])
+
+    with (
+        patch(
+            "purple_mcp.tools.investigation.get_settings",
+            return_value=mock_settings(),
+        ),
+        patch(
+            "purple_mcp.libs.investigation.collector.AlertsClient",
+            return_value=mock_alerts_client_factory,
+        ),
+        patch(
+            "purple_mcp.libs.investigation.collector.InventoryClient",
+            return_value=mock_inventory_client_factory,
+        ),
+    ):
+        result = await investigation_tool.initiate_investigation(PRIMARY_UUID)
+
+    bundle = json.loads(result)
+    rem = bundle["remediation"]
+    assert rem["status"] == "ok"
+    # Both pages combined → 5 events total
+    assert len(rem["history_events"]) == 5
+    # Clean exhaust → not truncated
+    assert rem["history_truncated"] is False
+
+    # The collector must have made 2 calls (one per page)
+    assert mock_alerts_client_factory.get_alert_history.call_count == 2
+    # Second call must have used the first page's endCursor
+    second_call = mock_alerts_client_factory.get_alert_history.call_args_list[1]
+    assert second_call.kwargs.get("after") == "cursor-page-1"
+
+
+@pytest.mark.asyncio
+async def test_initiate_investigation_history_respects_total_cap(
+    mock_settings: Callable[..., MagicMock],
+    mock_alerts_client_factory: MagicMock,
+    mock_inventory_client_factory: MagicMock,
+) -> None:
+    """The total cap stops pagination even when the API has more events."""
+    # Each page returns 4 events with hasNextPage=true (infinite stream)
+    infinite_page = _history_page(
+        events=[_history_event(f"action-{i}") for i in range(4)],
+        has_next=True,
+        end_cursor="next-cursor",
+    )
+    mock_alerts_client_factory.get_alert_history = AsyncMock(return_value=infinite_page)
+
+    with (
+        patch(
+            "purple_mcp.tools.investigation.get_settings",
+            return_value=mock_settings(),
+        ),
+        patch(
+            "purple_mcp.libs.investigation.collector.AlertsClient",
+            return_value=mock_alerts_client_factory,
+        ),
+        patch(
+            "purple_mcp.libs.investigation.collector.InventoryClient",
+            return_value=mock_inventory_client_factory,
+        ),
+    ):
+        # Cap at 8 events → expect exactly 2 pages of 4, then stop
+        result = await investigation_tool.initiate_investigation(
+            PRIMARY_UUID,
+            remediation_history_limit=8,
+        )
+
+    bundle = json.loads(result)
+    rem = bundle["remediation"]
+    assert rem["status"] == "ok"
+    assert len(rem["history_events"]) == 8
+    # Hit the cap with API still claiming more → truncated must be true
+    assert rem["history_truncated"] is True
+    # Sanity: pagination stopped at cap (≤ ceil(cap / 4) calls)
+    assert mock_alerts_client_factory.get_alert_history.call_count <= 3
+
+
+@pytest.mark.asyncio
+async def test_initiate_investigation_history_cap_validation(
+    mock_settings: Callable[..., MagicMock],
+) -> None:
+    """remediation_history_limit must be in (0, 1000]."""
+    with patch(
+        "purple_mcp.tools.investigation.get_settings",
+        return_value=mock_settings(),
+    ):
+        with pytest.raises(ValueError):
+            await investigation_tool.initiate_investigation(
+                PRIMARY_UUID, remediation_history_limit=0
+            )
+        with pytest.raises(ValueError):
+            await investigation_tool.initiate_investigation(
+                PRIMARY_UUID, remediation_history_limit=1001
+            )
