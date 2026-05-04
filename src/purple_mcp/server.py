@@ -95,6 +95,7 @@ from purple_mcp.tools.sdl import (
     get_timestamp_range,
     powerquery,
 )
+from purple_mcp.tools.storyline import GET_STORYLINE_EVENTS_DESCRIPTION, get_storyline_events
 from purple_mcp.tools.vulnerabilities import (
     GET_VULNERABILITY_DESCRIPTION,
     GET_VULNERABILITY_HISTORY_DESCRIPTION,
@@ -137,6 +138,7 @@ app.tool(description=GET_INVENTORY_ITEM_DESCRIPTION)(get_inventory_item)
 app.tool(description=LIST_INVENTORY_ITEMS_DESCRIPTION)(list_inventory_items)
 app.tool(description=SEARCH_INVENTORY_ITEMS_DESCRIPTION)(search_inventory_items)
 app.tool(description=INITIATE_INVESTIGATION_DESCRIPTION)(initiate_investigation)
+app.tool(description=GET_STORYLINE_EVENTS_DESCRIPTION)(get_storyline_events)
 
 
 @app.custom_route("/health", methods=["GET"])

@@ -144,17 +144,23 @@ class IncidentBundle(BaseModel):
     triage facts, then each section has its own status + payload + error.
     A sub-agent can dispatch on `summary.severity` and `summary.asset_type`,
     then walk into the section it specializes in.
+
+    Schema version 2 dropped the `storyline` section from the bundle —
+    storylines often contain hundreds of thousands of events, so they are
+    now fetched on demand via the separate `get_storyline_events` tool
+    using `summary.storyline_id`. Sub-agents that need raw EDR events
+    should call that tool with appropriate limits/time-window.
     """
 
-    schema_version: Literal["1"] = "1"
+    schema_version: Literal["2"] = "2"
     summary: IncidentSummary
     primary_alert: PrimaryAlertSection
     related_alerts: RelatedAlertsSection
     asset_inventory: AssetInventorySection
     remediation: RemediationSection
-    storyline: StorylineSection
     warnings: list[str] = Field(
         default_factory=list,
-        description="Soft warnings emitted during collection (e.g., missing storyline_id "
-        "preventing storyline search). Hard failures live in section.error.",
+        description="Soft warnings emitted during collection (e.g., missing asset_id "
+        "preventing related-alerts/inventory lookups). Hard failures live in "
+        "section.error.",
     )

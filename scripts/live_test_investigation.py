@@ -22,6 +22,7 @@ import keyring
 from purple_mcp.config import ENV_PREFIX, get_settings
 from purple_mcp.libs.alerts import AlertsClient, AlertsConfig, ViewType
 from purple_mcp.tools.investigation import initiate_investigation
+from purple_mcp.tools.storyline import get_storyline_events
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("live_test")
@@ -132,18 +133,6 @@ def _summarize(bundle_json: str) -> None:
     if rem.get("error"):
         print(f"     ERROR: {rem['error']}")
 
-    sl = bundle["storyline"]
-    print(
-        f"  storyline      : {sl['status']} "
-        f"(returned={sl.get('returned_count', 0)}, "
-        f"match_count={sl.get('match_count', 0)}, "
-        f"truncated={sl.get('truncated', False)})"
-    )
-    if sl.get("error"):
-        print(f"     ERROR: {sl['error']}")
-    if sl.get("query"):
-        print(f"     query: {sl['query']}")
-
     if bundle.get("warnings"):
         print()
         print("  warnings:")
@@ -151,6 +140,28 @@ def _summarize(bundle_json: str) -> None:
             print(f"     - {w}")
     print("=" * 78)
     print(f"\nBundle JSON length: {len(bundle_json)} bytes")
+
+
+def _summarize_storyline(section_json: str) -> None:
+    """Print a one-line summary of the storyline section (separate tool)."""
+    section = json.loads(section_json)
+    print()
+    print("=" * 78)
+    print("STORYLINE EVENTS  (separate tool: get_storyline_events)")
+    print("=" * 78)
+    print(f"  status        : {section['status']}")
+    print(f"  storyline_id  : {section.get('storyline_id')}")
+    print(
+        f"  returned/match: {section.get('returned_count', 0)} / "
+        f"{section.get('match_count', 0)}"
+    )
+    print(f"  truncated     : {section.get('truncated', False)}")
+    if section.get("error"):
+        print(f"  ERROR         : {section['error']}")
+    if section.get("query"):
+        print(f"  query         : {section['query']}")
+    print("=" * 78)
+    print(f"\nStoryline JSON length: {len(section_json)} bytes")
 
 
 async def main() -> None:
@@ -176,14 +187,33 @@ async def main() -> None:
     bundle_json = await initiate_investigation(alert_id)
 
     # Persist the bundle BEFORE printing so any print/encoding error
-    # doesn't lose the result. Default to /tmp/bundle.json on POSIX-style
-    # paths; users can override via PURPLEMCP_LIVE_TEST_OUT.
+    # doesn't lose the result. Users can override the path via
+    # PURPLEMCP_LIVE_TEST_OUT.
     out_path = Path(os.environ.get("PURPLEMCP_LIVE_TEST_OUT", "bundle.json"))
     with out_path.open("w", encoding="utf-8") as f:
         f.write(bundle_json)
     logger.info("Wrote full bundle to %s", out_path)
 
     _summarize(bundle_json)
+
+    # Follow-up: call the separate get_storyline_events tool with the
+    # storyline_id surfaced in the bundle summary. Skip cleanly if the
+    # bundle didn't carry one (e.g. STAR alerts on cloud telemetry).
+    bundle = json.loads(bundle_json)
+    storyline_id = bundle["summary"].get("storyline_id")
+    if not storyline_id:
+        logger.info("Bundle has no storyline_id; skipping storyline fetch.")
+        return
+
+    logger.info("Running get_storyline_events(%s)...", storyline_id)
+    storyline_json = await get_storyline_events(storyline_id, limit=200)
+
+    storyline_path = out_path.with_name(f"{out_path.stem}_storyline.json")
+    with storyline_path.open("w", encoding="utf-8") as f:
+        f.write(storyline_json)
+    logger.info("Wrote storyline to %s", storyline_path)
+
+    _summarize_storyline(storyline_json)
 
 
 if __name__ == "__main__":
