@@ -398,13 +398,14 @@ class TestServerIntegration:
 
             # Test that we can list tools (server is responsive)
             tools = await client.list_tools()
-            assert len(tools) == 22
+            assert len(tools) == 23
 
             # Test that all expected tools are present
             tool_names = [tool.name for tool in tools]
             assert "purple_ai" in tool_names
             assert "powerquery" in tool_names
             assert "get_timestamp_range" in tool_names
+            assert "initiate_investigation" in tool_names
 
     def test_http_app_has_correct_routes(self) -> None:
         """Test that HTTP app has the expected routes."""

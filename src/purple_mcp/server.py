@@ -71,6 +71,10 @@ from purple_mcp.tools.inventory import (
     list_inventory_items,
     search_inventory_items,
 )
+from purple_mcp.tools.investigation import (
+    INITIATE_INVESTIGATION_DESCRIPTION,
+    initiate_investigation,
+)
 from purple_mcp.tools.misconfigurations import (
     GET_MISCONFIGURATION_DESCRIPTION,
     GET_MISCONFIGURATION_HISTORY_DESCRIPTION,
@@ -132,6 +136,7 @@ app.tool(description=GET_VULNERABILITY_HISTORY_DESCRIPTION)(get_vulnerability_hi
 app.tool(description=GET_INVENTORY_ITEM_DESCRIPTION)(get_inventory_item)
 app.tool(description=LIST_INVENTORY_ITEMS_DESCRIPTION)(list_inventory_items)
 app.tool(description=SEARCH_INVENTORY_ITEMS_DESCRIPTION)(search_inventory_items)
+app.tool(description=INITIATE_INVESTIGATION_DESCRIPTION)(initiate_investigation)
 
 
 @app.custom_route("/health", methods=["GET"])
