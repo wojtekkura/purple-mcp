@@ -15,6 +15,7 @@ per-section status, error string, and payload.
 """
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from purple_mcp.libs.alerts import AlertsClient, AlertsConfig, FilterInput, ViewType
@@ -148,11 +149,18 @@ class InvestigationCollector:
         # ---- Phase 2: fan out the four subordinate fetches concurrently
         import asyncio
 
+        # IMPORTANT: use the resolved UUID (`primary_alert.id`), not the raw
+        # `alert_id` input — the analyst may have passed an externalId that
+        # was transparently resolved by `_fetch_primary_alert`. Downstream
+        # GraphQL queries require the UUID, and the related-alerts dedup
+        # compares against UUID `node.id`s.
+        resolved_alert_id = primary_alert.id
+
         related_task = asyncio.create_task(
             self._fetch_related_alerts(
                 alerts_client=alerts_client,
                 asset_id=asset_id,
-                primary_alert_id=alert_id,
+                primary_alert_id=resolved_alert_id,
                 window_start=start_time,
                 window_end=end_time,
                 limit=related_alerts_limit,
@@ -164,7 +172,7 @@ class InvestigationCollector:
         remediation_task = asyncio.create_task(
             self._fetch_remediation(
                 alerts_client=alerts_client,
-                alert_id=alert_id,
+                alert_id=resolved_alert_id,
                 history_limit=remediation_history_limit,
             )
         )
@@ -245,10 +253,78 @@ class InvestigationCollector:
             )
         )
 
+    @staticmethod
+    def _looks_like_uuid(value: str) -> bool:
+        """Return True if `value` parses as a standard UUID.
+
+        S1's Unified Alerts Management `alert(id: ID!)` query expects the
+        internal UUID. Analysts often paste an `externalId` instead — a
+        long numeric string that looks like `2470473633234860895`. We use
+        this check to decide whether to call `get_alert` directly or to
+        resolve via `search_alerts(externalId=...)` first.
+        """
+        try:
+            uuid.UUID(value)
+        except (ValueError, AttributeError, TypeError):
+            return False
+        return True
+
+    async def _resolve_alert_id(
+        self, alerts_client: AlertsClient, raw_alert_id: str
+    ) -> tuple[str | None, str | None]:
+        """Resolve an analyst-supplied alert reference to its internal UUID.
+
+        Returns:
+            (resolved_uuid, error_message). If the input is already a UUID
+            we return it unchanged. Otherwise we search by `externalId`:
+            a unique match returns its UUID; zero or multiple matches
+            return None plus a human-readable error.
+        """
+        if self._looks_like_uuid(raw_alert_id):
+            return raw_alert_id, None
+
+        logger.info(
+            "Alert id is not a UUID; resolving via externalId",
+            extra={"raw_alert_id": raw_alert_id},
+        )
+
+        filters = [FilterInput.create_string_equal("externalId", raw_alert_id)]
+        try:
+            connection = await alerts_client.search_alerts(
+                filters=filters, first=2, view_type=ViewType.ALL
+            )
+        except Exception as exc:
+            return None, (f"Failed to look up alert by externalId={raw_alert_id!r}: {exc}")
+
+        matches = [edge.node.id for edge in connection.edges]
+        if not matches:
+            return None, (
+                f"No alert found with id or externalId={raw_alert_id!r}. "
+                "Verify the value (UUIDs look like '019de8cc-…'; externalIds "
+                "are long numeric strings)."
+            )
+        if len(matches) > 1:
+            return None, (
+                f"Ambiguous: {len(matches)} alerts share externalId={raw_alert_id!r}. "
+                "Pass the internal UUID instead."
+            )
+
+        resolved = matches[0]
+        logger.info(
+            "Resolved externalId to UUID",
+            extra={"raw_alert_id": raw_alert_id, "resolved_uuid": resolved},
+        )
+        return resolved, None
+
     async def _fetch_primary_alert(
         self, alerts_client: AlertsClient, alert_id: str
     ) -> tuple[PrimaryAlertSection, Alert | None]:
         """Fetch the alert that anchors the investigation.
+
+        Accepts either the internal UUID or a numeric `externalId` — the
+        latter is auto-resolved via `search_alerts(externalId=…)` so an
+        analyst can paste the value straight from a ticket/email/SIEM
+        without having to re-look-up the UUID.
 
         Returns:
             Tuple of (section, alert_or_None). The section captures status
@@ -256,10 +332,17 @@ class InvestigationCollector:
             alert is returned alongside so phase 2 can derive asset_id /
             storyline_id without re-parsing.
         """
+        resolved_id, resolve_error = await self._resolve_alert_id(alerts_client, alert_id)
+        if resolved_id is None:
+            return (
+                PrimaryAlertSection(status=SectionStatus.FAILED, error=resolve_error),
+                None,
+            )
+
         try:
-            alert = await alerts_client.get_alert(alert_id)
+            alert = await alerts_client.get_alert(resolved_id)
         except Exception as exc:
-            logger.exception("Failed to fetch primary alert", extra={"alert_id": alert_id})
+            logger.exception("Failed to fetch primary alert", extra={"alert_id": resolved_id})
             return (
                 PrimaryAlertSection(status=SectionStatus.FAILED, error=str(exc)),
                 None,
@@ -269,7 +352,7 @@ class InvestigationCollector:
             return (
                 PrimaryAlertSection(
                     status=SectionStatus.EMPTY,
-                    error=f"Alert {alert_id} returned no record",
+                    error=f"Alert {resolved_id} returned no record",
                 ),
                 None,
             )
