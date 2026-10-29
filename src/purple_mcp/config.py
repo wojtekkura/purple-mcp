@@ -47,6 +47,7 @@ ENVIRONMENT_ENV: Final[str] = f"{ENV_PREFIX}ENV"
 LOGFIRE_TOKEN_ENV: Final[str] = f"{ENV_PREFIX}LOGFIRE_TOKEN"
 ENABLE_WRITE_TOOLS_ENV: Final[str] = f"{ENV_PREFIX}ENABLE_WRITE_TOOLS"
 CONSOLE_WRITE_TOKEN_ENV: Final[str] = f"{ENV_PREFIX}CONSOLE_WRITE_TOKEN"
+ENABLE_EXCLUSION_TOOLS_ENV: Final[str] = f"{ENV_PREFIX}ENABLE_EXCLUSION_TOOLS"
 STATELESS_HTTP_ENV = f"{ENV_PREFIX}STATELESS_HTTP"
 TRANSPORT_MODE_ENV = f"{ENV_PREFIX}TRANSPORT_MODE"
 
@@ -187,6 +188,13 @@ class Settings(BaseSettings):
             "Falls back to the console token when unset."
         ),
         validation_alias=CONSOLE_WRITE_TOKEN_ENV,
+    )
+    # Exclusions are applied through the SOAR "Create Path Exclusion" action for now; the MCP
+    # write tool stays off even with write tools enabled unless this is also set.
+    enable_exclusion_tools: bool = Field(
+        default=False,
+        description="Also register create_path_exclusion (requires enable_write_tools)",
+        validation_alias=ENABLE_EXCLUSION_TOOLS_ENV,
     )
 
     stateless_http: bool = Field(

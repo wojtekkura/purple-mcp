@@ -183,6 +183,9 @@ with contextlib.suppress(Exception):
 def register_write_tools(mcp_app: fastmcp.FastMCP[None], settings: Settings | None) -> bool:
     """Register state-changing tools only when explicitly enabled in settings.
 
+    ``create_path_exclusion`` additionally needs ``enable_exclusion_tools``: exclusions are
+    applied through the SOAR integration for now.
+
     Returns:
         True if write tools were registered.
     """
@@ -192,10 +195,11 @@ def register_write_tools(mcp_app: fastmcp.FastMCP[None], settings: Settings | No
         description=UPGRADE_AGENT_DESCRIPTION,
         annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
     )(upgrade_agent)
-    mcp_app.tool(
-        description=CREATE_PATH_EXCLUSION_DESCRIPTION,
-        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
-    )(create_path_exclusion)
+    if settings.enable_exclusion_tools is True:
+        mcp_app.tool(
+            description=CREATE_PATH_EXCLUSION_DESCRIPTION,
+            annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+        )(create_path_exclusion)
     return True
 
 

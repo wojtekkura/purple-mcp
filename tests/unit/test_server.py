@@ -428,8 +428,19 @@ class TestServerIntegration:
         assert "upgrade_agent" not in disabled_tools
         assert "create_path_exclusion" not in disabled_tools
 
+        # Write tools on, exclusion tools off (the default): only upgrade_agent
+        writes_app: fastmcp.FastMCP[None] = fastmcp.FastMCP("writes")
+        assert server.register_write_tools(
+            writes_app, MagicMock(enable_write_tools=True, enable_exclusion_tools=False)
+        )
+        writes_tools = await writes_app.get_tools()
+        assert "upgrade_agent" in writes_tools
+        assert "create_path_exclusion" not in writes_tools
+
         enabled_app: fastmcp.FastMCP[None] = fastmcp.FastMCP("enabled")
-        assert server.register_write_tools(enabled_app, MagicMock(enable_write_tools=True))
+        assert server.register_write_tools(
+            enabled_app, MagicMock(enable_write_tools=True, enable_exclusion_tools=True)
+        )
         tools = await enabled_app.get_tools()
         for name in ("upgrade_agent", "create_path_exclusion"):
             assert name in tools
@@ -437,6 +448,16 @@ class TestServerIntegration:
             assert annotations is not None
             assert annotations.destructiveHint is True
             assert annotations.readOnlyHint is False
+
+        # Exclusion flag alone does nothing without write tools
+        excl_only_app: fastmcp.FastMCP[None] = fastmcp.FastMCP("excl-only")
+        assert (
+            server.register_write_tools(
+                excl_only_app, MagicMock(enable_write_tools=False, enable_exclusion_tools=True)
+            )
+            is False
+        )
+        assert "create_path_exclusion" not in await excl_only_app.get_tools()
 
     def test_http_app_has_correct_routes(self) -> None:
         """Test that HTTP app has the expected routes."""

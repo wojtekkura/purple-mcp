@@ -102,6 +102,17 @@ uvx --from "purple-mcp @ https://github.com/wojtekkura/purple-mcp/archive/refs/h
 and add `"PURPLEMCP_ENABLE_WRITE_TOOLS": "true"` to the `env` block above. Without a write token,
 the console token is used.
 
+## Path exclusions (disabled by default)
+
+`list_path_exclusions(endpoint, value_contains, include_parents)` is read-only and always available.
+
+`create_path_exclusion(...)` creates an S1 path exclusion on the endpoint's group (or site) with the
+same preview → `confirm=true` flow, breadth guard and duplicate check as the SOAR
+*Create Path Exclusion* action; the approver, reason and reference are written to the exclusion
+description. Exclusions are applied through the SOAR integration for now, so this tool is
+**only registered when both `PURPLEMCP_ENABLE_WRITE_TOOLS=true` and
+`PURPLEMCP_ENABLE_EXCLUSION_TOOLS=true`**. The write token needs **Exclusions → View/Create**.
+
 ## License
 
 MIT — see [LICENSE](LICENSE)
