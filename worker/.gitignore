@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.log
+
+# Local Claude Code settings (contain machine-specific tokens/URLs)
+.claude/settings.local.json

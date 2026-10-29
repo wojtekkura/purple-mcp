@@ -1,0 +1,102 @@
+name = "purple-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Non-secret runtime knobs. Mirrors the Python purple-mcp's PURPLEMCP_* env vars,
+# minus anything that is a credential (those live in Secrets Store, below).
+[vars]
+# SentinelOne console base URL (HTTPS, no trailing slash). REQUIRED.
+PURPLE_CONSOLE_BASE_URL = "https://usea1-008.sentinelone.net"
+
+# GraphQL / REST endpoint paths (defaults match the Python source).
+PURPLE_CONSOLE_GRAPHQL_ENDPOINT = "/web/api/v2.1/graphql"
+PURPLE_ALERTS_GRAPHQL_ENDPOINT = "/web/api/v2.1/unifiedalerts/graphql"
+PURPLE_MISCONFIGURATIONS_GRAPHQL_ENDPOINT = "/web/api/v2.1/xspm/findings/misconfigurations/graphql"
+PURPLE_VULNERABILITIES_GRAPHQL_ENDPOINT = "/web/api/v2.1/xspm/findings/vulnerabilities/graphql"
+PURPLE_INVENTORY_RESTAPI_ENDPOINT = "/web/api/v2.1/xdr/assets"
+
+# SDL (Singularity Data Lake) — base is the console URL with /sdl appended by
+# the client; these are non-secret query knobs.
+PURPLE_SDL_MAX_QUERY_RESULTS = "10000"
+# Wall-clock budget (ms) a single powerquery request will poll before returning
+# a resume cursor. Keep well under the Worker request ceiling. The SDL query
+# TTL is ~30s, so resume cursors must be used promptly by the agent.
+PURPLE_SDL_POLL_BUDGET_MS = "22000"
+PURPLE_SDL_POLL_INTERVAL_MS = "1000"
+
+# Purple AI identity (non-secret). The team token is a credential -> Secrets Store.
+PURPLE_AI_ACCOUNT_ID = "0"
+PURPLE_AI_EMAIL_ADDRESS = ""
+PURPLE_AI_CONSOLE_VERSION = "S"
+
+# 'production' forbids TLS-verify bypass in the SDL client (parity with Python).
+PURPLE_ENV = "production"
+
+# Optional caller IP allowlist (CF-Connecting-IP). Empty = off.
+ALLOWED_IPS = ""
+
+# create_path_exclusion (scope exclusions:write) is hidden and refused unless "true".
+# Path exclusions are applied through the Sumo Logic SOAR "Create Path Exclusion"
+# action for now; list_path_exclusions (agents:read) is always available.
+PURPLE_ENABLE_EXCLUSION_TOOLS = "false"
+
+# KV — per-user MCP-bearer records, keyed by sha256(bearer).
+# Replace `id`/`preview_id` with the namespace IDs from
+# `wrangler kv namespace create TOKENS_KV` (and `--preview`).
+[[kv_namespaces]]
+binding = "TOKENS_KV"
+id = "1a0f48cdf7914af0ae0578800de5a95b"
+preview_id = "3dbecee80c254bf5b19bb69797570ef9"
+
+# D1 — audit log database.
+# Replace `database_id` with the ID from `wrangler d1 create purple_mcp_audit`.
+[[d1_databases]]
+binding = "AUDIT_DB"
+database_name = "purple_mcp_audit"
+database_id = "b0213e61-224a-4ad2-af1c-79ec834ea620"
+
+# Cloudflare Secrets Store bindings — account-scoped, audit-logged, centrally
+# managed, rotated without a Worker redeploy. Same pattern as cf-mcp.
+#
+# Store: default_secrets_store (shared with cf-mcp), so purple secret NAMES are
+# namespaced (purple-*) to avoid collisions with cf-mcp's secrets in the store.
+#
+# v1 binds three secrets. PURPLE_AI_TEAM_TOKEN and SIEM_WEBHOOK_URL are omitted —
+# resolveSecrets() treats absent bindings as "unset" (team token "" / SIEM off).
+# To enable them, create the secrets and re-add the bindings here.
+
+[[secrets_store_secrets]]
+binding = "PURPLE_MCP_ADMIN_KEY"
+store_id = "8be4814c1e1e42528113d35b4e084863"
+secret_name = "purple-mcp-admin-key"
+
+[[secrets_store_secrets]]
+binding = "CURSOR_HMAC_KEY"
+store_id = "8be4814c1e1e42528113d35b4e084863"
+secret_name = "purple-cursor-hmac-key"
+
+[[secrets_store_secrets]]
+binding = "PURPLE_CONSOLE_TOKEN"
+store_id = "8be4814c1e1e42528113d35b4e084863"
+secret_name = "purple-console-token"
+
+[[secrets_store_secrets]]
+binding = "SIEM_WEBHOOK_URL"
+store_id = "8be4814c1e1e42528113d35b4e084863"
+secret_name = "purple-siem-webhook-url"
+
+# Optional: S1 token whose role allows Endpoints -> Update/Upgrade software (and
+# Exclusions -> View/Create if PURPLE_ENABLE_EXCLUSION_TOOLS is turned on). Used
+# ONLY by write tools (upgrade_agent, create_path_exclusion). Unbound = they fail closed
+# with a `denied` error; it never falls back to purple-console-token.
+# Create the secret first, then uncomment:
+#   npx wrangler secrets-store secret create 8be4814c1e1e42528113d35b4e084863 \
+#     --name purple-console-write-token --scopes workers --remote
+# [[secrets_store_secrets]]
+# binding = "PURPLE_CONSOLE_WRITE_TOKEN"
+# store_id = "8be4814c1e1e42528113d35b4e084863"
+# secret_name = "purple-console-write-token"
+
+[observability]
+enabled = true
