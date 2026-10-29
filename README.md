@@ -13,7 +13,8 @@ Purple AI MCP is a [Model Context Protocol](https://modelcontextprotocol.io/) se
 - **Misconfigurations** — review cloud and Kubernetes misconfigurations
 - **Asset Inventory** — search and explore your asset inventory
 
-Purple AI MCP is read-only — it cannot make changes to your SentinelOne account.
+By default Purple AI MCP is read-only — it cannot make changes to your SentinelOne account.
+See [Write tools](#write-tools-remote-agent-upgrade) for the one opt-in exception.
 
 ## Quick Start
 
@@ -76,6 +77,30 @@ Edit `%APPDATA%\Claude\claude_desktop_config.json`:
 Replace `https://your-console.sentinelone.net` with your actual console URL. The token is read automatically from Windows Credential Manager at startup — no token in the config file.
 
 Restart Claude Desktop after saving the file.
+
+## Write tools: remote agent upgrade
+
+Two read-only tools are always available:
+
+- `get_agent_upgrade_options(endpoint)` — current agent version vs. the newest GA package for the endpoint's OS/arch.
+- `get_agent_upgrade_status(endpoint)` — current version plus recent upgrade activity.
+
+`upgrade_agent(endpoint, package_id, confirm)` triggers `agents/actions/update-software` and is
+**only registered when `PURPLEMCP_ENABLE_WRITE_TOOLS=true`**. It is analyst-confirmed by design:
+
+1. `confirm=false` (default) returns a preview (current version, target version, `package_id`) and changes nothing.
+2. After the analyst approves, call again with `confirm=true` and that `package_id`. The agent is
+   re-checked (still active, still outdated) before the upgrade is sent. The POST is never retried.
+
+The upgrade needs a token whose role allows **Endpoints → Update/Upgrade software**. Use a dedicated
+service-user token rather than widening the read token:
+
+```powershell
+uvx --from "purple-mcp @ https://github.com/wojtekkura/purple-mcp/archive/refs/heads/main.tar.gz" purple-mcp-store-token --write
+```
+
+and add `"PURPLEMCP_ENABLE_WRITE_TOOLS": "true"` to the `env` block above. Without a write token,
+the console token is used.
 
 ## License
 

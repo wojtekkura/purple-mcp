@@ -398,7 +398,7 @@ class TestServerIntegration:
 
             # Test that we can list tools (server is responsive)
             tools = await client.list_tools()
-            assert len(tools) == 24
+            assert len(tools) == 26
 
             # Test that all expected tools are present
             tool_names = [tool.name for tool in tools]
@@ -407,6 +407,31 @@ class TestServerIntegration:
             assert "get_timestamp_range" in tool_names
             assert "initiate_investigation" in tool_names
             assert "get_storyline_events" in tool_names
+            assert "get_agent_upgrade_options" in tool_names
+            assert "get_agent_upgrade_status" in tool_names
+            # Write tools stay off unless PURPLEMCP_ENABLE_WRITE_TOOLS is set
+            assert "upgrade_agent" not in tool_names
+
+    @pytest.mark.asyncio
+    async def test_write_tools_registered_only_when_enabled(self) -> None:
+        """upgrade_agent is registered, as destructive, only with enable_write_tools."""
+        import fastmcp
+
+        disabled_app: fastmcp.FastMCP[None] = fastmcp.FastMCP("disabled")
+        assert server.register_write_tools(disabled_app, None) is False
+        assert (
+            server.register_write_tools(disabled_app, MagicMock(enable_write_tools=False)) is False
+        )
+        assert "upgrade_agent" not in await disabled_app.get_tools()
+
+        enabled_app: fastmcp.FastMCP[None] = fastmcp.FastMCP("enabled")
+        assert server.register_write_tools(enabled_app, MagicMock(enable_write_tools=True))
+        tools = await enabled_app.get_tools()
+        assert "upgrade_agent" in tools
+        annotations = tools["upgrade_agent"].annotations
+        assert annotations is not None
+        assert annotations.destructiveHint is True
+        assert annotations.readOnlyHint is False
 
     def test_http_app_has_correct_routes(self) -> None:
         """Test that HTTP app has the expected routes."""

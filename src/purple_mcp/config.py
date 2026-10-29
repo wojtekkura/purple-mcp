@@ -45,6 +45,8 @@ PURPLE_AI_BUILD_HASH_ENV: Final[str] = f"{ENV_PREFIX}PURPLE_AI_BUILD_HASH"
 PURPLE_AI_CONSOLE_VERSION_ENV: Final[str] = f"{ENV_PREFIX}PURPLE_AI_CONSOLE_VERSION"
 ENVIRONMENT_ENV: Final[str] = f"{ENV_PREFIX}ENV"
 LOGFIRE_TOKEN_ENV: Final[str] = f"{ENV_PREFIX}LOGFIRE_TOKEN"
+ENABLE_WRITE_TOOLS_ENV: Final[str] = f"{ENV_PREFIX}ENABLE_WRITE_TOOLS"
+CONSOLE_WRITE_TOKEN_ENV: Final[str] = f"{ENV_PREFIX}CONSOLE_WRITE_TOKEN"
 STATELESS_HTTP_ENV = f"{ENV_PREFIX}STATELESS_HTTP"
 TRANSPORT_MODE_ENV = f"{ENV_PREFIX}TRANSPORT_MODE"
 
@@ -170,6 +172,21 @@ class Settings(BaseSettings):
         default=None,
         description="Optional Pydantic Logfire token for observability",
         validation_alias=LOGFIRE_TOKEN_ENV,
+    )
+
+    # Write tools (e.g. remote agent upgrade) are off unless explicitly enabled
+    enable_write_tools: bool = Field(
+        default=False,
+        description="Register tools that change state in the SentinelOne console",
+        validation_alias=ENABLE_WRITE_TOOLS_ENV,
+    )
+    console_write_token: str | None = Field(
+        default=None,
+        description=(
+            "Optional token for write tools, e.g. a service user allowed to upgrade agents. "
+            "Falls back to the console token when unset."
+        ),
+        validation_alias=CONSOLE_WRITE_TOKEN_ENV,
     )
 
     stateless_http: bool = Field(
@@ -317,6 +334,12 @@ class Settings(BaseSettings):
         logger.info(
             "%sCONSOLE_TOKEN is configured (used for both Console and SDL access)", ENV_PREFIX
         )
+        if self.enable_write_tools:
+            logger.warning(
+                "Write tools are ENABLED (%s); separate write token configured: %s",
+                ENABLE_WRITE_TOOLS_ENV,
+                bool(self.console_write_token),
+            )
 
 
 @lru_cache
@@ -338,6 +361,8 @@ def get_settings() -> Settings:
 
             register_secret(settings.sdl_api_token)
             register_secret(settings.graphql_service_token)
+            if settings.console_write_token:
+                register_secret(settings.console_write_token)
         except ImportError:
             # Filter module not available - this shouldn't happen in normal operation
             logger.warning("Logging security filter not available - tokens may appear in logs")

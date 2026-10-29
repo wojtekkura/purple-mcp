@@ -51,6 +51,14 @@ from starlette.responses import JSONResponse
 
 from purple_mcp.config import Settings, get_settings
 from purple_mcp.observability import initialize_logfire, instrument_starlette_app
+from purple_mcp.tools.agent_upgrade import (
+    GET_AGENT_UPGRADE_OPTIONS_DESCRIPTION,
+    GET_AGENT_UPGRADE_STATUS_DESCRIPTION,
+    UPGRADE_AGENT_DESCRIPTION,
+    get_agent_upgrade_options,
+    get_agent_upgrade_status,
+    upgrade_agent,
+)
 from purple_mcp.tools.alerts import (
     GET_ALERT_DESCRIPTION,
     GET_ALERT_HISTORY_DESCRIPTION,
@@ -139,6 +147,14 @@ app.tool(description=LIST_INVENTORY_ITEMS_DESCRIPTION)(list_inventory_items)
 app.tool(description=SEARCH_INVENTORY_ITEMS_DESCRIPTION)(search_inventory_items)
 app.tool(description=INITIATE_INVESTIGATION_DESCRIPTION)(initiate_investigation)
 app.tool(description=GET_STORYLINE_EVENTS_DESCRIPTION)(get_storyline_events)
+app.tool(
+    description=GET_AGENT_UPGRADE_OPTIONS_DESCRIPTION,
+    annotations={"readOnlyHint": True},
+)(get_agent_upgrade_options)
+app.tool(
+    description=GET_AGENT_UPGRADE_STATUS_DESCRIPTION,
+    annotations={"readOnlyHint": True},
+)(get_agent_upgrade_status)
 
 
 @app.custom_route("/health", methods=["GET"])
@@ -152,6 +168,24 @@ settings = None
 # Use get_settings to ensure usage of lru_cache decorator.
 with contextlib.suppress(Exception):
     settings = get_settings()
+
+
+def register_write_tools(mcp_app: fastmcp.FastMCP[None], settings: Settings | None) -> bool:
+    """Register state-changing tools only when explicitly enabled in settings.
+
+    Returns:
+        True if write tools were registered.
+    """
+    if not settings or not settings.enable_write_tools:
+        return False
+    mcp_app.tool(
+        description=UPGRADE_AGENT_DESCRIPTION,
+        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    )(upgrade_agent)
+    return True
+
+
+register_write_tools(app, settings)
 
 
 def get_http_app(

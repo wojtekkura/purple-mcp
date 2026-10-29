@@ -24,6 +24,7 @@ VALID_MODES: tuple[str, ...] = ("stdio", "sse", "streamable-http")
 
 KEYRING_SERVICE_NAME: str = "purple-mcp"
 KEYRING_TOKEN_KEY: str = "PURPLEMCP_CONSOLE_TOKEN"
+KEYRING_WRITE_TOKEN_KEY: str = "PURPLEMCP_CONSOLE_WRITE_TOKEN"
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +158,37 @@ def _resolve_token_from_keyring() -> None:
             "Using PURPLEMCP_CONSOLE_TOKEN from OS credential store",
             err=True,
         )
+
+        from purple_mcp.logging_security import register_secret
+
+        register_secret(token)
+
+
+def _resolve_write_token_from_keyring() -> None:
+    """Load PURPLEMCP_CONSOLE_WRITE_TOKEN from the OS credential store when write tools are on.
+
+    Same contract as ``_resolve_token_from_keyring``: an explicit environment
+    value wins, and any keyring failure is silent (the console token is used).
+    """
+    if os.environ.get(f"{ENV_PREFIX}ENABLE_WRITE_TOOLS", "").lower() not in ("1", "true", "yes"):
+        return
+    env_key = f"{ENV_PREFIX}CONSOLE_WRITE_TOKEN"
+    if os.environ.get(env_key):
+        return
+
+    try:
+        import keyring
+
+        token: str | None = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_WRITE_TOKEN_KEY)
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Failed to read write token from OS credential store", exc_info=True
+        )
+        return
+
+    if token:
+        os.environ[env_key] = token
+        click.echo("Using PURPLEMCP_CONSOLE_WRITE_TOKEN from OS credential store", err=True)
 
         from purple_mcp.logging_security import register_secret
 
@@ -475,6 +507,7 @@ def main(
 
     # Attempt credential store lookup before Settings creation
     _resolve_token_from_keyring()
+    _resolve_write_token_from_keyring()
 
     settings = _create_settings()
     click.echo("✓ Configuration validated successfully", err=True)
@@ -502,13 +535,19 @@ def main(
     confirmation_prompt=True,
     help="The SentinelOne Console API token to store",
 )
-def store_token(token: str) -> None:
-    """Store PURPLEMCP_CONSOLE_TOKEN in the OS credential store.
+@click.option(
+    "--write",
+    is_flag=True,
+    help="Store it as PURPLEMCP_CONSOLE_WRITE_TOKEN (used by write tools such as upgrade_agent)",
+)
+def store_token(token: str, write: bool) -> None:
+    """Store PURPLEMCP_CONSOLE_TOKEN (or, with --write, the write token) in the OS credential store.
 
     Saves the token to Windows Credential Manager (Windows),
     Keychain (macOS), or Secret Service (Linux) so it does not
     need to be specified in plaintext configuration files.
     """
+    key = KEYRING_WRITE_TOKEN_KEY if write else KEYRING_TOKEN_KEY
     try:
         import keyring
     except ImportError:
@@ -519,10 +558,10 @@ def store_token(token: str) -> None:
         sys.exit(1)
 
     try:
-        keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_TOKEN_KEY, token)
+        keyring.set_password(KEYRING_SERVICE_NAME, key, token)
         click.echo(
             f"Token stored successfully in OS credential store "
-            f"(service={KEYRING_SERVICE_NAME!r}, key={KEYRING_TOKEN_KEY!r})",
+            f"(service={KEYRING_SERVICE_NAME!r}, key={key!r})",
             err=True,
         )
     except Exception as exc:
