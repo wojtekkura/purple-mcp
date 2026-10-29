@@ -71,6 +71,12 @@ from purple_mcp.tools.alerts import (
     list_alerts,
     search_alerts,
 )
+from purple_mcp.tools.exclusions import (
+    CREATE_PATH_EXCLUSION_DESCRIPTION,
+    LIST_PATH_EXCLUSIONS_DESCRIPTION,
+    create_path_exclusion,
+    list_path_exclusions,
+)
 from purple_mcp.tools.inventory import (
     GET_INVENTORY_ITEM_DESCRIPTION,
     LIST_INVENTORY_ITEMS_DESCRIPTION,
@@ -155,6 +161,10 @@ app.tool(
     description=GET_AGENT_UPGRADE_STATUS_DESCRIPTION,
     annotations={"readOnlyHint": True},
 )(get_agent_upgrade_status)
+app.tool(
+    description=LIST_PATH_EXCLUSIONS_DESCRIPTION,
+    annotations={"readOnlyHint": True},
+)(list_path_exclusions)
 
 
 @app.custom_route("/health", methods=["GET"])
@@ -182,6 +192,10 @@ def register_write_tools(mcp_app: fastmcp.FastMCP[None], settings: Settings | No
         description=UPGRADE_AGENT_DESCRIPTION,
         annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
     )(upgrade_agent)
+    mcp_app.tool(
+        description=CREATE_PATH_EXCLUSION_DESCRIPTION,
+        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False},
+    )(create_path_exclusion)
     return True
 
 

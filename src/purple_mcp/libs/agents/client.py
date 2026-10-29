@@ -1,4 +1,4 @@
-"""REST client for the SentinelOne Management API (agents, update packages, activities)."""
+"""REST client for the SentinelOne Management API (agents, update packages, exclusions, activities)."""
 
 import logging
 from collections.abc import Mapping
@@ -197,6 +197,71 @@ class AgentsClient:
         data = body.get("data") or {}
         affected = data.get("affected", 0) if isinstance(data, dict) else 0
         return int(affected)
+
+    async def list_exclusions(
+        self,
+        *,
+        group_id: str | None = None,
+        site_id: str | None = None,
+        os_type: str | None = None,
+        value_contains: str | None = None,
+        include_parents: bool = True,
+        max_items: int = 1000,
+    ) -> list[ApiObject]:
+        """List path exclusions that apply to a group or site, following pagination.
+
+        Args:
+            group_id: Group scope (takes precedence over ``site_id``).
+            site_id: Site scope.
+            os_type: Only exclusions for this OS (windows, macos, linux).
+            value_contains: Only exclusions whose path contains this text.
+            include_parents: Also return exclusions defined on parent scopes (site, account).
+            max_items: Stop after this many exclusions.
+
+        Returns:
+            Exclusion objects (possibly empty).
+        """
+        params: dict[str, str | int] = {"type": "path", "limit": min(max_items, 1000)}
+        if group_id:
+            params["groupIds"] = group_id
+        elif site_id:
+            params["siteIds"] = site_id
+        else:
+            raise ValueError("One of group_id or site_id is required")
+        if os_type:
+            params["osTypes"] = os_type
+        if value_contains:
+            params["value__contains"] = value_contains
+        if include_parents:
+            params["includeParents"] = "true"
+
+        items: list[ApiObject] = []
+        while len(items) < max_items:
+            body = await self._get("/exclusions", params)
+            items.extend(item for item in body.get("data") or [] if isinstance(item, dict))
+            pagination = body.get("pagination") or {}
+            cursor = pagination.get("nextCursor") if isinstance(pagination, dict) else None
+            if not cursor:
+                break
+            params["cursor"] = str(cursor)
+        return items[:max_items]
+
+    async def create_exclusion(self, body: Mapping[str, object]) -> ApiObject:
+        """Create one exclusion. Sent once, never retried.
+
+        Args:
+            body: Full request body with ``filter`` (scope) and ``data`` (the exclusion).
+
+        Returns:
+            The created exclusion object as returned by the console.
+        """
+        response = await self._post("/exclusions", body)
+        data = response.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+        if isinstance(data, dict):
+            return data
+        raise AgentsAPIError("Exclusion create returned no exclusion object")
 
     async def list_activities(self, agent_id: str, limit: int = 50) -> list[ApiObject]:
         """List the most recent console activities for one agent."""
